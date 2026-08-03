@@ -1,0 +1,19 @@
+{
+  "name": "subscription-club-platform",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": ["apps/*"],
+  "scripts": {
+    "build": "npm run build -w @club-platform/api && npm run build -w @club-platform/worker && npm run build -w @club-platform/web",
+    "dev:api": "npm run start:dev -w @club-platform/api",
+    "dev:worker": "npm run start:dev -w @club-platform/worker",
+    "dev:web": "npm run dev -w @club-platform/web",
+    "typecheck": "npm run typecheck -w @club-platform/api && npm run typecheck -w @club-platform/worker && npm run typecheck -w @club-platform/web",
+    "lint": "npm run lint -w @club-platform/api && npm run lint -w @club-platform/worker && npm run lint -w @club-platform/web",
+    "test": "npm run test -w @club-platform/api",
+    "migration:run": "npm run migration:run -w @club-platform/api",
+    "migration:revert": "npm run migration:revert -w @club-platform/api",
+    "seed": "npm run seed -w @club-platform/api"
+  },
+  "engines": { "node": ">=20.0.0", "npm": ">=10.0.0" }
+}

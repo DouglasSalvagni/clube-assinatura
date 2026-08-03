@@ -1,0 +1,91 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-club_platform}
+      POSTGRES_USER: ${POSTGRES_USER:-club}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks: [club_network]
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+      restart_policy:
+        condition: on-failure
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    networks: [club_network]
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+      restart_policy:
+        condition: on-failure
+
+  api:
+    image: ${API_IMAGE:-club-platform-api:latest}
+    environment:
+      NODE_ENV: production
+      APP_NAME: ${APP_NAME:-ClubFlow}
+      API_PORT: "4003"
+      API_URL: ${API_URL}
+      DATABASE_URL: ${DATABASE_INTERNAL_URL:-postgresql://club:club@postgres:5432/club_platform}
+      REDIS_URL: ${REDIS_INTERNAL_URL:-redis://redis:6379/0}
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      JWT_ACCESS_TTL: ${JWT_ACCESS_TTL:-15m}
+      JWT_REFRESH_TTL_DAYS: ${JWT_REFRESH_TTL_DAYS:-30}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      INTERNAL_WORKER_TOKEN: ${INTERNAL_WORKER_TOKEN}
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      ASAAS_PRODUCTION_URL: ${ASAAS_PRODUCTION_URL:-https://api.asaas.com/v3}
+      ASAAS_SANDBOX_URL: ${ASAAS_SANDBOX_URL:-https://api-sandbox.asaas.com/v3}
+      ASAAS_MOCK: ${ASAAS_MOCK:-false}
+      ASAAS_WEBHOOK_ALERT_EMAIL: ${ASAAS_WEBHOOK_ALERT_EMAIL:-}
+    networks: [club_network]
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+
+  worker:
+    image: ${WORKER_IMAGE:-club-platform-worker:latest}
+    environment:
+      NODE_ENV: production
+      REDIS_URL: ${REDIS_INTERNAL_URL:-redis://redis:6379/0}
+      API_INTERNAL_URL: http://api:4003/api
+      INTERNAL_WORKER_TOKEN: ${INTERNAL_WORKER_TOKEN}
+      WEBHOOK_WORKER_CONCURRENCY: ${WEBHOOK_WORKER_CONCURRENCY:-10}
+      WEBHOOK_WORKER_RATE_LIMIT: ${WEBHOOK_WORKER_RATE_LIMIT:-100}
+    networks: [club_network]
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+
+  web:
+    image: ${WEB_IMAGE:-club-platform-web:latest}
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-/api}
+      NEXT_PUBLIC_PRODUCT_NAME: ${NEXT_PUBLIC_PRODUCT_NAME:-ClubFlow}
+    networks: [club_network]
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  club_network:
+    driver: overlay
+    attachable: true

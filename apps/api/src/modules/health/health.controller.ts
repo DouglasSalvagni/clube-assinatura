@@ -1,0 +1,1 @@
+import{Controller,Get}from'@nestjs/common';import{DataSource}from'typeorm';@Controller('health')export class HealthController{constructor(private d:DataSource){}@Get()async get(){let database='down';try{await this.d.query('SELECT 1');database='up'}catch{}return{status:database==='up'?'ok':'degraded',database,timestamp:new Date().toISOString()}}}

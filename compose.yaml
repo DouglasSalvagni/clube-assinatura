@@ -1,0 +1,107 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-club_platform}
+      POSTGRES_USER: ${POSTGRES_USER:-club}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-club}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-club} -d ${POSTGRES_DB:-club_platform}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [club_network]
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [club_network]
+
+  migrate:
+    build:
+      context: .
+      target: api
+    env_file: .env
+    environment:
+      DATABASE_URL: ${DATABASE_INTERNAL_URL:-postgresql://club:club@postgres:5432/club_platform}
+    command: ["npm", "run", "migration:run", "-w", "@club-platform/api"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks: [club_network]
+
+  api:
+    build:
+      context: .
+      target: api
+    env_file: .env
+    environment:
+      DATABASE_URL: ${DATABASE_INTERNAL_URL:-postgresql://club:club@postgres:5432/club_platform}
+      REDIS_URL: ${REDIS_INTERNAL_URL:-redis://redis:6379/0}
+      API_URL: ${API_URL:-http://localhost:4003}
+    ports:
+      - "${API_PORT:-4003}:4003"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:4003/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks: [club_network]
+
+  worker:
+    build:
+      context: .
+      target: worker
+    env_file: .env
+    environment:
+      REDIS_URL: ${REDIS_INTERNAL_URL:-redis://redis:6379/0}
+      API_INTERNAL_URL: ${API_DOCKER_INTERNAL_URL:-http://api:4003/api}
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [club_network]
+
+  web:
+    build:
+      context: .
+      target: web
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-/api}
+        NEXT_PUBLIC_PRODUCT_NAME: ${NEXT_PUBLIC_PRODUCT_NAME:-ClubFlow}
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-/api}
+      NEXT_PUBLIC_PRODUCT_NAME: ${NEXT_PUBLIC_PRODUCT_NAME:-ClubFlow}
+    ports:
+      - "${WEB_PORT:-4002}:4002"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [club_network]
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  club_network:
+    driver: bridge

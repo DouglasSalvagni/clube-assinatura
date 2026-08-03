@@ -1,0 +1,52 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --surface-canvas: 220 14% 96%;
+    --surface: 0 0% 100%;
+    --surface-elevated: 0 0% 100%;
+    --surface-input: 220 14% 94%;
+
+    --ink: 220 20% 14%;
+    --ink-secondary: 220 10% 38%;
+    --ink-tertiary: 220 8% 56%;
+    --ink-muted: 220 6% 72%;
+
+    --edge: 220 14% 90%;
+    --edge-soft: 220 14% 94%;
+    --edge-emphasis: 220 12% 82%;
+  }
+
+  html {
+    background: hsl(var(--surface-canvas));
+    color-scheme: light;
+  }
+
+  .dark {
+    --surface-canvas: 220 14% 8%;
+    --surface: 220 12% 12%;
+    --surface-elevated: 220 12% 16%;
+    --surface-input: 220 10% 20%;
+
+    --ink: 220 12% 88%;
+    --ink-secondary: 220 10% 68%;
+    --ink-tertiary: 220 8% 52%;
+    --ink-muted: 220 6% 38%;
+
+    --edge: 220 10% 22%;
+    --edge-soft: 220 10% 18%;
+    --edge-emphasis: 220 8% 28%;
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-surface-canvas text-ink antialiased;
+  }
+
+  ::selection {
+    background: hsl(var(--brand) / 0.18);
+    color: hsl(var(--ink));
+  }
+}
