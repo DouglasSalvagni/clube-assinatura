@@ -178,18 +178,38 @@ export class CommercialConfigService {
     const offer = await this.offer(unitId, offerId);
     const version = await this.offerVersions.findOne({ where: { unitId, offerId, id: versionId } });
     if (!version) throw new NotFoundException('Versão da oferta não encontrada.');
+    if (version.status === CommercialOfferVersionStatus.RETIRED) {
+      throw new ConflictException('Uma versão histórica não pode voltar a ser vigente. Crie uma nova versão.');
+    }
     if (!version.allowedBillingTypes.length) throw new BadRequestException('Defina ao menos uma forma de pagamento.');
     if (!version.contractTemplateVersionId) {
       throw new BadRequestException('Selecione uma versão contratual publicada antes de publicar a oferta.');
     }
     await this.assertPublishedTemplateVersion(unitId, version.contractTemplateVersionId, offer.customerType);
-    version.status = CommercialOfferVersionStatus.PUBLISHED;
-    version.publishedAt = new Date();
-    version.effectiveFrom ||= new Date().toISOString().slice(0, 10);
-    offer.status = CommercialOfferStatus.PUBLISHED;
-    offer.active = true;
-    await this.offers.save(offer);
-    return this.offerVersions.save(version);
+
+    return this.offerVersions.manager.transaction(async (manager) => {
+      const versionRepository = manager.getRepository(CommercialOfferVersion);
+      const offerRepository = manager.getRepository(CommercialOffer);
+      const current = await versionRepository.findOne({
+        where: { unitId, offerId, status: CommercialOfferVersionStatus.PUBLISHED },
+        lock: { mode: 'pessimistic_write' },
+      });
+
+      if (current && current.id !== version.id) {
+        current.status = CommercialOfferVersionStatus.RETIRED;
+        current.effectiveTo = new Date().toISOString().slice(0, 10);
+        await versionRepository.save(current);
+      }
+
+      version.status = CommercialOfferVersionStatus.PUBLISHED;
+      version.publishedAt ||= new Date();
+      version.effectiveFrom ||= new Date().toISOString().slice(0, 10);
+      version.effectiveTo = null;
+      offer.status = CommercialOfferStatus.PUBLISHED;
+      offer.active = true;
+      await offerRepository.save(offer);
+      return versionRepository.save(version);
+    });
   }
 
   async listPipelines(unitId: string) {
@@ -314,9 +334,51 @@ export class CommercialConfigService {
     }));
   }
 
+  async updateTemplate(unitId: string, id: string, dto: CreateContractTemplateDto) {
+    const template = await this.templates.findOne({ where: { unitId, id } });
+    if (!template) throw new NotFoundException('Modelo contratual não encontrado.');
+
+    const code = dto.code?.trim()
+      ? this.normalizeCode(dto.code)
+      : template.code || await this.nextAvailableCode(this.templates, unitId, dto.name, id);
+    const duplicate = await this.templates.findOne({ where: { unitId, code } });
+    if (duplicate && duplicate.id !== id) {
+      throw new ConflictException('Já existe um modelo com este código.');
+    }
+
+    if (dto.customerType !== template.customerType) {
+      const hasVersions = await this.templateVersions.exists({ where: { unitId, templateId: id } });
+      if (hasVersions) {
+        throw new BadRequestException('O tipo de cliente não pode ser alterado depois que o modelo possui versões.');
+      }
+    }
+
+    template.name = dto.name.trim();
+    template.code = code;
+    template.customerType = dto.customerType;
+    template.active = dto.active !== false;
+    template.metadata = dto.metadata || template.metadata || {};
+    return this.templates.save(template);
+  }
+
+  async revokeTemplate(unitId: string, id: string) {
+    const template = await this.templates.findOne({ where: { unitId, id } });
+    if (!template) throw new NotFoundException('Modelo contratual não encontrado.');
+    template.active = false;
+    return this.templates.save(template);
+  }
+
+  async restoreTemplate(unitId: string, id: string) {
+    const template = await this.templates.findOne({ where: { unitId, id } });
+    if (!template) throw new NotFoundException('Modelo contratual não encontrado.');
+    template.active = true;
+    return this.templates.save(template);
+  }
+
   async createTemplateVersion(unitId: string, templateId: string, dto: CreateContractTemplateVersionDto) {
     const template = await this.templates.findOne({ where: { unitId, id: templateId } });
     if (!template) throw new NotFoundException('Modelo contratual não encontrado.');
+    if (!template.active) throw new BadRequestException('Reative o modelo antes de criar uma nova versão.');
     this.validateTemplateVariables(dto.content, dto.variables);
     const latest = await this.templateVersions.findOne({ where: { unitId, templateId }, order: { version: 'DESC' } });
     return this.templateVersions.save(this.templateVersions.create({
@@ -330,7 +392,27 @@ export class CommercialConfigService {
     }));
   }
 
+  async updateTemplateVersion(
+    unitId: string,
+    templateId: string,
+    versionId: string,
+    dto: CreateContractTemplateVersionDto,
+  ) {
+    const version = await this.templateVersions.findOne({ where: { unitId, templateId, id: versionId } });
+    if (!version) throw new NotFoundException('Versão contratual não encontrada.');
+    if (version.status !== ContractTemplateStatus.DRAFT) {
+      throw new ConflictException('Uma versão publicada é imutável. Crie uma nova versão para alterar o contrato.');
+    }
+    this.validateTemplateVariables(dto.content, dto.variables);
+    version.content = dto.content;
+    version.variables = [...new Set(dto.variables)];
+    return this.templateVersions.save(version);
+  }
+
   async publishTemplateVersion(unitId: string, templateId: string, versionId: string) {
+    const template = await this.templates.findOne({ where: { unitId, id: templateId } });
+    if (!template) throw new NotFoundException('Modelo contratual não encontrado.');
+    if (!template.active) throw new BadRequestException('Reative o modelo antes de publicar uma versão.');
     const version = await this.templateVersions.findOne({ where: { unitId, templateId, id: versionId } });
     if (!version) throw new NotFoundException('Versão contratual não encontrada.');
     version.status = ContractTemplateStatus.PUBLISHED;

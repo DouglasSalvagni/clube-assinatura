@@ -12,6 +12,7 @@ export function logout() {
   localStorage.removeItem('accessToken');
   localStorage.removeItem('refreshToken');
   localStorage.removeItem('tenantId');
+  localStorage.removeItem('unitId');
   if (refreshToken) {
     void fetch(`${process.env.NEXT_PUBLIC_API_URL || '/api'}/auth/logout`, {
       method: 'POST',
@@ -19,5 +20,5 @@ export function logout() {
       body: JSON.stringify({ refreshToken }),
     }).catch(() => undefined);
   }
-  window.location.href = '/login';
+  window.location.href = window.location.pathname.startsWith('/admin') ? '/admin/login' : '/login';
 }

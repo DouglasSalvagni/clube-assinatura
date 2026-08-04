@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter, useParams } from 'next/navigation';
+import { CurrencyInput } from '@/components/masked-number-input';
 import { api } from '@/lib/api';
 import { usePageTitle } from '@/lib/page-title-context';
 import { useDialog } from '@/lib/dialog-context';
@@ -110,7 +111,7 @@ export default function VidaDetailPage() {
   });
   const [savingTitular, setSavingTitular] = useState(false);
   const [showPaymentModal, setShowPaymentModal] = useState(false);
-  const [paymentValue, setPaymentValue] = useState(0);
+  const [paymentValue, setPaymentValue] = useState('0.00');
   const [paymentDueDate, setPaymentDueDate] = useState('');
   const [paymentBillingType, setPaymentBillingType] = useState('BOLETO');
   const [creatingPayment, setCreatingPayment] = useState(false);
@@ -443,7 +444,7 @@ export default function VidaDetailPage() {
           {invoices.length > 0 && (
             <button onClick={() => {
               const devidas = invoices.filter((i) => i.status === 'PENDING' || i.status === 'OVERDUE');
-              setPaymentValue(devidas.reduce((a, i) => a + (i.value || 0), 0));
+              setPaymentValue(devidas.reduce((a, i) => a + (i.value || 0), 0).toFixed(2));
               setPaymentDueDate(new Date().toISOString().slice(0, 10));
               setPaymentBillingType('BOLETO');
               setPaymentResult(null);
@@ -550,7 +551,7 @@ export default function VidaDetailPage() {
                     const res = await api(`/vidas/${customerId}/create-payment`, {
                       method: 'POST',
                       body: JSON.stringify({
-                        value: paymentValue,
+                        value: Number(paymentValue || 0),
                         dueDate: paymentDueDate,
                         billingType: paymentBillingType,
                       }),
@@ -564,9 +565,9 @@ export default function VidaDetailPage() {
                 }} className="space-y-4">
                   <div>
                     <label className="mb-1 block text-xs font-medium text-ink-secondary">Valor</label>
-                    <input type="number" step="0.01" required
+                    <CurrencyInput required
                       className="w-full rounded-lg border border-edge bg-surface-input px-3 py-2 text-sm text-ink placeholder:text-ink-muted focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/20"
-                      value={paymentValue} onChange={(e) => setPaymentValue(Number(e.target.value))} />
+                      value={paymentValue} onValueChange={setPaymentValue} placeholder="R$ 0,00" />
                   </div>
                   <div>
                     <label className="mb-1 block text-xs font-medium text-ink-secondary">Data de Vencimento</label>

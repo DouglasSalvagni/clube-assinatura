@@ -1,12 +1,19 @@
 'use client';
 
 import { FormEvent, useEffect, useState } from 'react';
+import { CurrencyInput, PercentageInput } from '@/components/masked-number-input';
 import { api } from '@/lib/api';
+import {
+  billingTypeLabels,
+  customerTypeLabels,
+  unitRoleLabels,
+} from '@/lib/commercial-labels';
 import { usePageTitle } from '@/lib/page-title-context';
 
 type Policy = {
   id: string;
   name: string;
+  customerType: 'PERSON' | 'COMPANY' | null;
   targetRole: string | null;
   targetUserId: string | null;
   maxDiscountPercent: string;
@@ -14,6 +21,8 @@ type Policy = {
   minUnitPrice: string | null;
   allowedBillingTypes: string[];
   active: boolean;
+  archivedAt: string | null;
+  rules: { maxLives?: number };
 };
 
 type CommercialMetrics = {
@@ -35,6 +44,8 @@ type User = {
   id: string;
   name: string;
   email?: string;
+  role?: string;
+  globalRole?: string;
 };
 
 type Approval = {
@@ -47,8 +58,42 @@ type Approval = {
   createdAt: string;
 };
 
-const roles = ['OWNER', 'ADMIN', 'MANAGER', 'SALES', 'FINANCE', 'SUPPORT', 'VIEWER'];
+type PolicyForm = {
+  name: string;
+  customerType: 'ALL' | 'PERSON' | 'COMPANY';
+  targetType: 'ROLE' | 'USER' | 'ALL';
+  targetRole: string;
+  targetUserId: string;
+  maxDiscountPercent: string;
+  maxDiscountAmount: string;
+  minUnitPrice: string;
+  maxLives: string;
+  allowedBillingTypes: string[];
+};
+
+const roleValues = ['OWNER', 'ADMIN', 'MANAGER', 'SALES'];
 const billingTypes = ['CREDIT_CARD', 'BOLETO', 'PIX'];
+const legacyUserRoleLabels: Record<string, string> = {
+  administrador: 'Administrador',
+  gerente: 'Gerente',
+  representante: 'Negociador / Comercial',
+  'super-admin': 'Administrador da instalação',
+};
+
+const emptyForm: PolicyForm = {
+  name: '',
+  customerType: 'ALL',
+  targetType: 'ROLE',
+  targetRole: 'SALES',
+  targetUserId: '',
+  maxDiscountPercent: '0.00',
+  maxDiscountAmount: '',
+  minUnitPrice: '',
+  maxLives: '',
+  allowedBillingTypes: ['CREDIT_CARD'],
+};
+
+const money = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' });
 
 export default function CommercialConfigurationPage() {
   const { setPageTitle } = usePageTitle();
@@ -57,22 +102,14 @@ export default function CommercialConfigurationPage() {
   const [users, setUsers] = useState<User[]>([]);
   const [metrics, setMetrics] = useState<CommercialMetrics | null>(null);
   const [featureStatus, setFeatureStatus] = useState<CommercialFeatureStatus | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
   const [saving, setSaving] = useState(false);
-  const [form, setForm] = useState({
-    name: '',
-    targetType: 'ROLE',
-    targetRole: 'SALES',
-    targetUserId: '',
-    maxDiscountPercent: '0',
-    maxDiscountAmount: '',
-    minUnitPrice: '',
-    maxLives: '',
-    allowedBillingTypes: ['CREDIT_CARD'] as string[],
-  });
+  const [form, setForm] = useState<PolicyForm>(emptyForm);
 
   useEffect(() => {
-    setPageTitle('Configuração comercial', 'Limites de negociação e aprovações');
+    setPageTitle('Políticas comerciais', 'Alçadas, limites de negociação e aprovações da sede.');
     void load();
   }, [setPageTitle]);
 
@@ -86,49 +123,107 @@ export default function CommercialConfigurationPage() {
         api('/commercial/metrics?days=30').catch(() => null),
         api('/commercial/feature').catch(() => null),
       ]);
-      setPolicies(policyData || []);
-      setApprovals(approvalData || []);
-      setUsers(userData.data || []);
+      setPolicies(Array.isArray(policyData) ? policyData : policyData.data || []);
+      setApprovals(Array.isArray(approvalData) ? approvalData : approvalData.data || []);
+      setUsers(Array.isArray(userData) ? userData : userData.data || []);
       setMetrics(metricsData);
       setFeatureStatus(featureData);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Falha ao carregar configurações.');
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Falha ao carregar configurações.');
     }
+  }
+
+  function resetForm() {
+    setEditingId(null);
+    setForm(emptyForm);
+  }
+
+  function editPolicy(policy: Policy) {
+    setEditingId(policy.id);
+    setForm({
+      name: policy.name,
+      customerType: policy.customerType || 'ALL',
+      targetType: policy.targetUserId ? 'USER' : policy.targetRole ? 'ROLE' : 'ALL',
+      targetRole: policy.targetRole || 'SALES',
+      targetUserId: policy.targetUserId || '',
+      maxDiscountPercent: policy.maxDiscountPercent || '0.00',
+      maxDiscountAmount: policy.maxDiscountAmount || '',
+      minUnitPrice: policy.minUnitPrice || '',
+      maxLives: policy.rules?.maxLives ? String(policy.rules.maxLives) : '',
+      allowedBillingTypes: policy.allowedBillingTypes || [],
+    });
+    document.getElementById('formulario-politica')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
   async function submit(event: FormEvent) {
     event.preventDefault();
     setSaving(true);
     setError('');
+    setSuccess('');
     try {
-      await api('/commercial/policies', {
-        method: 'POST',
+      const existing = editingId ? policies.find((policy) => policy.id === editingId) : null;
+      await api(editingId ? `/commercial/policies/${editingId}` : '/commercial/policies', {
+        method: editingId ? 'PATCH' : 'POST',
         body: JSON.stringify({
           name: form.name,
+          customerType: form.customerType === 'ALL' ? undefined : form.customerType,
           targetRole: form.targetType === 'ROLE' ? form.targetRole : undefined,
           targetUserId: form.targetType === 'USER' ? form.targetUserId : undefined,
           maxDiscountPercent: Number(form.maxDiscountPercent || 0),
           maxDiscountAmount: form.maxDiscountAmount ? Number(form.maxDiscountAmount) : undefined,
-          minUnitPrice: form.minUnitPrice ? Number(form.minUnitPrice) : undefined,
+          minUnitPrice: form.customerType === 'PERSON' || !form.minUnitPrice
+            ? undefined
+            : Number(form.minUnitPrice),
           allowedBillingTypes: form.allowedBillingTypes,
-          rules: form.maxLives ? { maxLives: Number(form.maxLives) } : {},
-          active: true,
+          rules: form.customerType !== 'PERSON' && form.maxLives
+            ? { maxLives: Number(form.maxLives) }
+            : {},
+          active: existing?.active ?? true,
         }),
       });
-      setForm({
-        name: '',
-        targetType: 'ROLE',
-        targetRole: 'SALES',
-        targetUserId: '',
-        maxDiscountPercent: '0',
-        maxDiscountAmount: '',
-        minUnitPrice: '',
-        maxLives: '',
-        allowedBillingTypes: ['CREDIT_CARD'],
-      });
+      setSuccess(editingId ? 'Política atualizada.' : 'Política criada.');
+      resetForm();
       await load();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Falha ao salvar política.');
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Falha ao salvar política.');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function changePolicyState(policy: Policy, action: 'activate' | 'deactivate' | 'restore') {
+    setSaving(true);
+    setError('');
+    setSuccess('');
+    try {
+      await api(`/commercial/policies/${policy.id}/${action}`, { method: 'POST' });
+      setSuccess(
+        action === 'activate'
+          ? 'Política ativada.'
+          : action === 'deactivate'
+            ? 'Política desativada. Ela não será usada nas próximas avaliações.'
+            : 'Política restaurada como inativa. Revise e ative quando estiver pronta.',
+      );
+      await load();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Falha ao alterar a política.');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function archivePolicy(policy: Policy) {
+    if (!window.confirm(`Arquivar a política “${policy.name}”? O histórico será preservado e ela deixará de ser aplicada.`)) return;
+    setSaving(true);
+    setError('');
+    setSuccess('');
+    try {
+      await api(`/commercial/policies/${policy.id}`, { method: 'DELETE' });
+      if (editingId === policy.id) resetForm();
+      setSuccess('Política arquivada.');
+      await load();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Falha ao arquivar política.');
     } finally {
       setSaving(false);
     }
@@ -142,8 +237,8 @@ export default function CommercialConfigurationPage() {
         body: JSON.stringify({ decision }),
       });
       await load();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Falha ao decidir aprovação.');
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Falha ao decidir aprovação.');
     }
   }
 
@@ -157,25 +252,51 @@ export default function CommercialConfigurationPage() {
         body: JSON.stringify({ enabled: !featureStatus.unitEnabled }),
       });
       setFeatureStatus(updated);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Falha ao alterar a disponibilidade do fluxo comercial.');
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Falha ao alterar a disponibilidade do fluxo comercial.');
     } finally {
       setSaving(false);
     }
   }
 
   function toggleBillingType(type: string) {
-    setForm(current => ({
+    setForm((current) => ({
       ...current,
       allowedBillingTypes: current.allowedBillingTypes.includes(type)
-        ? current.allowedBillingTypes.filter(item => item !== type)
+        ? current.allowedBillingTypes.filter((item) => item !== type)
         : [...current.allowedBillingTypes, type],
     }));
   }
 
+  function audienceLabel(policy: Policy) {
+    if (policy.targetUserId) {
+      const user = users.find((item) => item.id === policy.targetUserId);
+      return user ? `${user.name}${user.email ? ` — ${user.email}` : ''}` : 'Usuário específico';
+    }
+    if (policy.targetRole) return unitRoleLabels[policy.targetRole] || policy.targetRole;
+    return 'Todos os usuários da sede';
+  }
+
+  function statusLabel(policy: Policy) {
+    if (policy.archivedAt) return { label: 'Arquivada', classes: 'bg-surface-canvas text-ink-tertiary' };
+    if (policy.active) return { label: 'Ativa', classes: 'bg-green-100 text-green-800' };
+    return { label: 'Inativa', classes: 'bg-amber-100 text-amber-800' };
+  }
+
+  const negotiationUsers = users.filter((user) =>
+    user.globalRole === 'INSTALLATION_ADMIN'
+    || ['administrador', 'gerente', 'representante', 'super-admin'].includes(user.role || ''));
+
   return (
-    <div className="space-y-8 p-8">
+    <div className="space-y-8">
+      <nav className="flex flex-wrap gap-2 rounded-xl border border-edge bg-surface-elevated p-2 text-sm">
+        <a href="#politicas-cadastradas" className="rounded-lg px-3 py-2 hover:bg-surface-canvas">Políticas cadastradas</a>
+        <a href="#formulario-politica" className="rounded-lg px-3 py-2 hover:bg-surface-canvas">Criar ou editar</a>
+        <a href="#aprovacoes" className="rounded-lg px-3 py-2 hover:bg-surface-canvas">Aprovações</a>
+      </nav>
+
       {error && <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</div>}
+      {success && <div className="rounded-lg border border-green-200 bg-green-50 p-3 text-sm text-green-700">{success}</div>}
 
       {featureStatus && (
         <section className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-edge bg-surface-elevated p-5">
@@ -216,106 +337,206 @@ export default function CommercialConfigurationPage() {
           </article>
           <article className="rounded-xl border border-edge bg-surface-elevated p-5">
             <p className="text-xs text-ink-tertiary">Falhas de webhook</p>
-            <p className="mt-2 text-2xl font-semibold">{Object.values(metrics.webhookFailuresByStatus).reduce((total: number, value: number) => total + value, 0)}</p>
+            <p className="mt-2 text-2xl font-semibold">{Object.values(metrics.webhookFailuresByStatus).reduce((total, value) => total + value, 0)}</p>
           </article>
         </section>
       )}
 
-      <section className="rounded-xl border border-edge bg-surface-elevated p-6">
-        <h1 className="text-lg font-semibold">Nova política de negociação</h1>
-        <form onSubmit={submit} className="mt-5 grid gap-4 md:grid-cols-2">
-          <label className="space-y-1 text-sm">
-            <span>Nome</span>
-            <input className="w-full rounded-lg border px-3 py-2" value={form.name} required onChange={e => setForm({ ...form, name: e.target.value })} />
-          </label>
-          <label className="space-y-1 text-sm">
-            <span>Aplicar a</span>
-            <select className="w-full rounded-lg border px-3 py-2" value={form.targetType} onChange={e => setForm({ ...form, targetType: e.target.value })}>
-              <option value="ROLE">Classe de usuários</option>
-              <option value="USER">Usuário específico</option>
-              <option value="ALL">Todos da sede</option>
-            </select>
-          </label>
-          {form.targetType === 'ROLE' && (
+      <section className="grid gap-4 lg:grid-cols-2">
+        <article className="rounded-xl border border-blue-200 bg-blue-50 p-5 text-sm text-blue-950">
+          <h2 className="font-semibold">Perfis e classes de usuários</h2>
+          <p className="mt-2 leading-6">
+            Os perfis exibidos são papéis reais dos vínculos com a sede e possuem permissão para negociar: proprietário, administrador, gerente e negociador. Financeiro, suporte e somente leitura existem no sistema, mas não aparecem aqui porque não têm permissão de negociação. Os valores internos permanecem em inglês para estabilidade técnica, mas os nomes exibidos estão traduzidos.
+          </p>
+        </article>
+        <article className="rounded-xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-950">
+          <h2 className="font-semibold">Percentual x valor nominal</h2>
+          <p className="mt-2 leading-6">
+            O desconto percentual limita a proporção sobre o valor-base. O desconto nominal limita o total abatido em reais.
+            Quando ambos forem preenchidos, os dois limites precisam ser respeitados.
+          </p>
+        </article>
+      </section>
+
+      <section id="formulario-politica" className="scroll-mt-24 rounded-xl border border-edge bg-surface-elevated p-6">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold">{editingId ? 'Editar política' : 'Nova política de negociação'}</h2>
+            <p className="mt-1 text-sm text-ink-tertiary">Defina para quem, para qual tipo de contratação e dentro de quais limites a regra será aplicada.</p>
+          </div>
+          {editingId && <button type="button" onClick={resetForm} className="rounded-lg border px-3 py-2 text-sm">Cancelar edição</button>}
+        </div>
+
+        <form onSubmit={submit} className="mt-5 space-y-6">
+          <fieldset className="grid gap-4 rounded-xl border border-edge p-4 md:grid-cols-2">
+            <legend className="px-2 text-sm font-semibold">Aplicação da política</legend>
             <label className="space-y-1 text-sm">
-              <span>Perfil</span>
-              <select className="w-full rounded-lg border px-3 py-2" value={form.targetRole} onChange={e => setForm({ ...form, targetRole: e.target.value })}>
-                {roles.map(role => <option key={role}>{role}</option>)}
+              <span className="font-medium">Nome da política</span>
+              <input className="w-full rounded-lg border px-3 py-2" value={form.name} required onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="Ex.: Alçada PJ dos negociadores" />
+            </label>
+            <label className="space-y-1 text-sm">
+              <span className="font-medium">Tipo de contratação</span>
+              <select className="w-full rounded-lg border px-3 py-2" value={form.customerType} onChange={(event) => setForm({ ...form, customerType: event.target.value as PolicyForm['customerType'] })}>
+                <option value="ALL">Pessoa física e jurídica</option>
+                <option value="PERSON">Somente pessoa física</option>
+                <option value="COMPANY">Somente pessoa jurídica</option>
+              </select>
+              <small className="block text-xs text-ink-tertiary">Use políticas separadas quando PF e PJ tiverem alçadas ou formas de pagamento diferentes.</small>
+            </label>
+            <label className="space-y-1 text-sm">
+              <span className="font-medium">Aplicar a</span>
+              <select className="w-full rounded-lg border px-3 py-2" value={form.targetType} onChange={(event) => setForm({ ...form, targetType: event.target.value as PolicyForm['targetType'] })}>
+                <option value="ROLE">Classe de usuários</option>
+                <option value="USER">Usuário específico</option>
+                <option value="ALL">Todos da sede</option>
               </select>
             </label>
-          )}
-          {form.targetType === 'USER' && (
+            {form.targetType === 'ROLE' && (
+              <label className="space-y-1 text-sm">
+                <span className="font-medium">Perfil de usuário</span>
+                <select className="w-full rounded-lg border px-3 py-2" value={form.targetRole} onChange={(event) => setForm({ ...form, targetRole: event.target.value })}>
+                  {roleValues.map((role) => <option key={role} value={role}>{unitRoleLabels[role]}</option>)}
+                </select>
+              </label>
+            )}
+            {form.targetType === 'USER' && (
+              <label className="space-y-1 text-sm">
+                <span className="font-medium">Usuário específico</span>
+                <select required className="w-full rounded-lg border px-3 py-2" value={form.targetUserId} onChange={(event) => setForm({ ...form, targetUserId: event.target.value })}>
+                  <option value="">Selecione</option>
+                  {negotiationUsers.map((user) => (
+                    <option key={user.id} value={user.id}>
+                      {user.name}{user.email ? ` — ${user.email}` : ''}{user.role ? ` · ${legacyUserRoleLabels[user.role] || user.role}` : ''}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+          </fieldset>
+
+          <fieldset className="grid gap-4 rounded-xl border border-edge p-4 md:grid-cols-2">
+            <legend className="px-2 text-sm font-semibold">Limites de desconto</legend>
             <label className="space-y-1 text-sm">
-              <span>Usuário</span>
-              <select required className="w-full rounded-lg border px-3 py-2" value={form.targetUserId} onChange={e => setForm({ ...form, targetUserId: e.target.value })}>
-                <option value="">Selecione</option>
-                {users.map(user => <option key={user.id} value={user.id}>{user.name}{user.email ? ` — ${user.email}` : ''}</option>)}
-              </select>
+              <span className="font-medium">Desconto percentual máximo</span>
+              <PercentageInput
+                required
+                value={form.maxDiscountPercent}
+                onValueChange={(value) => setForm({ ...form, maxDiscountPercent: value })}
+                className="w-full rounded-lg border px-3 py-2"
+                placeholder="0,00%"
+              />
+              <small className="block text-xs text-ink-tertiary">Percentual máximo sobre o valor-base da contratação.</small>
             </label>
+            <label className="space-y-1 text-sm">
+              <span className="font-medium">Desconto máximo em reais</span>
+              <CurrencyInput
+                value={form.maxDiscountAmount}
+                onValueChange={(value) => setForm({ ...form, maxDiscountAmount: value })}
+                className="w-full rounded-lg border px-3 py-2"
+                placeholder="Sem limite nominal quando vazio"
+              />
+              <small className="block text-xs text-ink-tertiary">Teto absoluto do valor abatido. Ex.: 10% com limite de R$ 500,00.</small>
+            </label>
+          </fieldset>
+
+          {form.customerType !== 'PERSON' && (
+            <fieldset className="grid gap-4 rounded-xl border border-edge p-4 md:grid-cols-2">
+              <legend className="px-2 text-sm font-semibold">Limites empresariais</legend>
+              <label className="space-y-1 text-sm">
+                <span className="font-medium">Preço mínimo por vida</span>
+                <CurrencyInput
+                  value={form.minUnitPrice}
+                  onValueChange={(value) => setForm({ ...form, minUnitPrice: value })}
+                  className="w-full rounded-lg border px-3 py-2"
+                  placeholder="Sem preço mínimo quando vazio"
+                />
+              </label>
+              <label className="space-y-1 text-sm">
+                <span className="font-medium">Quantidade máxima de vidas</span>
+                <input className="w-full rounded-lg border px-3 py-2" type="number" min="1" step="1" value={form.maxLives} onChange={(event) => setForm({ ...form, maxLives: event.target.value })} placeholder="Sem limite quando vazio" />
+              </label>
+            </fieldset>
           )}
-          <label className="space-y-1 text-sm">
-            <span>Desconto percentual máximo</span>
-            <input className="w-full rounded-lg border px-3 py-2" type="number" min="0" max="100" step="0.01" value={form.maxDiscountPercent} onChange={e => setForm({ ...form, maxDiscountPercent: e.target.value })} />
-          </label>
-          <label className="space-y-1 text-sm">
-            <span>Desconto nominal máximo</span>
-            <input className="w-full rounded-lg border px-3 py-2" type="number" min="0" step="0.01" value={form.maxDiscountAmount} onChange={e => setForm({ ...form, maxDiscountAmount: e.target.value })} />
-          </label>
-          <label className="space-y-1 text-sm">
-            <span>Preço mínimo por vida</span>
-            <input className="w-full rounded-lg border px-3 py-2" type="number" min="0" step="0.01" value={form.minUnitPrice} onChange={e => setForm({ ...form, minUnitPrice: e.target.value })} />
-          </label>
-          <label className="space-y-1 text-sm">
-            <span>Quantidade máxima de vidas</span>
-            <input className="w-full rounded-lg border px-3 py-2" type="number" min="1" step="1" value={form.maxLives} onChange={e => setForm({ ...form, maxLives: e.target.value })} />
-          </label>
-          <fieldset className="space-y-2 text-sm">
-            <legend>Formas permitidas</legend>
-            <div className="flex flex-wrap gap-3">
-              {billingTypes.map(type => (
-                <label key={type} className="flex items-center gap-2">
+
+          <fieldset className="rounded-xl border border-edge p-4">
+            <legend className="px-2 text-sm font-semibold">Formas de pagamento permitidas</legend>
+            <div className="flex flex-wrap gap-4">
+              {billingTypes.map((type) => (
+                <label key={type} className="flex items-center gap-2 text-sm">
                   <input type="checkbox" checked={form.allowedBillingTypes.includes(type)} onChange={() => toggleBillingType(type)} />
-                  {type}
+                  {billingTypeLabels[type] || type}
                 </label>
               ))}
             </div>
           </fieldset>
-          <button disabled={saving || !form.allowedBillingTypes.length} className="rounded-lg bg-brand px-4 py-2 text-sm font-medium text-white md:col-span-2 disabled:opacity-50">
-            Salvar política
+
+          <button disabled={saving || !form.allowedBillingTypes.length} className="w-full rounded-lg bg-brand px-4 py-2 text-sm font-medium text-white disabled:opacity-50">
+            {editingId ? 'Salvar alterações' : 'Criar política'}
           </button>
         </form>
       </section>
 
-      <section className="rounded-xl border border-edge bg-surface-elevated p-6">
-        <h2 className="text-lg font-semibold">Políticas ativas</h2>
-        <div className="mt-4 overflow-x-auto">
-          <table className="w-full text-left text-sm">
-            <thead><tr className="border-b"><th className="py-2">Nome</th><th>Perfil</th><th>Desconto</th><th>Preço mínimo</th><th>Pagamento</th></tr></thead>
-            <tbody>
-              {policies.map(policy => (
-                <tr key={policy.id} className="border-b last:border-0">
-                  <td className="py-3">{policy.name}</td>
-                  <td>{policy.targetUserId ? users.find(user => user.id === policy.targetUserId)?.name || 'Usuário específico' : policy.targetRole || 'Todos'}</td>
-                  <td>{Number(policy.maxDiscountPercent).toLocaleString('pt-BR')}%</td>
-                  <td>{policy.minUnitPrice ? Number(policy.minUnitPrice).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }) : '—'}</td>
-                  <td>{policy.allowedBillingTypes.join(', ') || '—'}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      <section id="politicas-cadastradas" className="scroll-mt-24 rounded-xl border border-edge bg-surface-elevated p-6">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold">Políticas cadastradas</h2>
+            <p className="mt-1 text-sm text-ink-tertiary">Políticas inativas e arquivadas permanecem no histórico, mas não participam das avaliações.</p>
+          </div>
+          <span className="text-sm text-ink-tertiary">{policies.length} política(s)</span>
+        </div>
+        <div className="mt-4 space-y-3">
+          {policies.map((policy) => {
+            const status = statusLabel(policy);
+            return (
+              <article key={policy.id} className={`rounded-xl border p-4 ${policy.archivedAt ? 'opacity-65' : ''}`}>
+                <div className="flex flex-wrap items-start justify-between gap-4">
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h3 className="font-medium">{policy.name}</h3>
+                      <span className={`rounded-full px-2 py-0.5 text-xs ${status.classes}`}>{status.label}</span>
+                    </div>
+                    <p className="mt-1 text-sm text-ink-tertiary">
+                      {customerTypeLabels[policy.customerType || 'ALL']} · {audienceLabel(policy)}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {!policy.archivedAt && <button type="button" onClick={() => editPolicy(policy)} className="rounded-md border px-3 py-1.5 text-xs">Editar</button>}
+                    {!policy.archivedAt && (
+                      <button type="button" disabled={saving} onClick={() => changePolicyState(policy, policy.active ? 'deactivate' : 'activate')} className="rounded-md border px-3 py-1.5 text-xs">
+                        {policy.active ? 'Desativar' : 'Ativar'}
+                      </button>
+                    )}
+                    {!policy.archivedAt ? (
+                      <button type="button" disabled={saving} onClick={() => archivePolicy(policy)} className="rounded-md border border-red-200 px-3 py-1.5 text-xs text-red-700">Arquivar</button>
+                    ) : (
+                      <button type="button" disabled={saving} onClick={() => changePolicyState(policy, 'restore')} className="rounded-md border px-3 py-1.5 text-xs">Restaurar</button>
+                    )}
+                  </div>
+                </div>
+                <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-5">
+                  <div><dt className="text-xs text-ink-tertiary">Desconto percentual</dt><dd className="mt-1 font-medium">{Number(policy.maxDiscountPercent).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%</dd></div>
+                  <div><dt className="text-xs text-ink-tertiary">Desconto em reais</dt><dd className="mt-1 font-medium">{policy.maxDiscountAmount ? money.format(Number(policy.maxDiscountAmount)) : 'Sem teto nominal'}</dd></div>
+                  <div><dt className="text-xs text-ink-tertiary">Preço mínimo por vida</dt><dd className="mt-1 font-medium">{policy.minUnitPrice ? money.format(Number(policy.minUnitPrice)) : 'Não definido'}</dd></div>
+                  <div><dt className="text-xs text-ink-tertiary">Máximo de vidas</dt><dd className="mt-1 font-medium">{policy.rules?.maxLives || 'Não definido'}</dd></div>
+                  <div><dt className="text-xs text-ink-tertiary">Pagamento</dt><dd className="mt-1 font-medium">{policy.allowedBillingTypes.map((type) => billingTypeLabels[type] || type).join(', ') || 'Nenhum'}</dd></div>
+                </dl>
+              </article>
+            );
+          })}
+          {!policies.length && <p className="text-sm text-ink-tertiary">Nenhuma política cadastrada.</p>}
         </div>
       </section>
 
-      <section className="rounded-xl border border-edge bg-surface-elevated p-6">
+      <section id="aprovacoes" className="scroll-mt-24 rounded-xl border border-edge bg-surface-elevated p-6">
         <h2 className="text-lg font-semibold">Aprovações pendentes</h2>
         <div className="mt-4 space-y-3">
-          {approvals.filter(item => item.status === 'PENDING').map(item => (
+          {approvals.filter((item) => item.status === 'PENDING').map((item) => (
             <article key={item.id} className="rounded-lg border p-4">
               <p className="font-medium">Oportunidade {item.opportunityId}</p>
               <p className="mt-1 text-sm text-ink-tertiary">{item.reason}</p>
               {!!item.policyEvaluation?.violations?.length && (
                 <ul className="mt-2 list-disc pl-5 text-sm text-red-700">
-                  {item.policyEvaluation.violations.map(violation => <li key={violation}>{violation}</li>)}
+                  {item.policyEvaluation.violations.map((violation) => <li key={violation}>{violation}</li>)}
                 </ul>
               )}
               <div className="mt-4 flex gap-2">
@@ -324,7 +545,7 @@ export default function CommercialConfigurationPage() {
               </div>
             </article>
           ))}
-          {!approvals.some(item => item.status === 'PENDING') && <p className="text-sm text-ink-tertiary">Nenhuma aprovação pendente.</p>}
+          {!approvals.some((item) => item.status === 'PENDING') && <p className="text-sm text-ink-tertiary">Nenhuma aprovação pendente.</p>}
         </div>
       </section>
     </div>

@@ -118,6 +118,10 @@
 - [x] Criar tela de ofertas e versões de preço.
 - [x] Criar tela de políticas e limites de negociação.
 - [x] Criar atribuição de política por perfil e usuário.
+- [x] Permitir editar, ativar, desativar, arquivar e restaurar políticas.
+- [x] Permitir escopo de política para PF, PJ ou ambas as modalidades.
+- [x] Traduzir os perfis e explicar os limites percentual e monetário na interface.
+- [x] Aplicar máscaras de moeda e percentual nos formulários financeiros editáveis.
 - [x] Criar tela de pipelines e etapas.
 - [x] Criar tela de modelos contratuais.
 - [x] Criar consulta e decisão de aprovações.

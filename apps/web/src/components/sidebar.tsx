@@ -51,7 +51,9 @@ export default function Sidebar({ links, title = 'ClubFlow' }: SidebarProps) {
 
       <nav className="flex-1 space-y-0.5 p-3">
         {links.map((link) => {
-          const isActive = pathname === link.href;
+          const isActive = link.href === '/dashboard'
+            ? pathname === link.href
+            : pathname === link.href || pathname.startsWith(`${link.href}/`);
           return (
             <Link
               key={link.href}

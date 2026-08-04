@@ -20,10 +20,7 @@ const baseLinks = [
 ];
 
 const commercialAdminLinks = [
-  { label: 'Políticas comerciais', href: '/dashboard/configuracoes/comercial', icon: <IconSettings /> },
-  { label: 'Ofertas e preços', href: '/dashboard/configuracoes/ofertas', icon: <IconSettings /> },
-  { label: 'Funis comerciais', href: '/dashboard/configuracoes/funis', icon: <IconSettings /> },
-  { label: 'Modelos contratuais', href: '/dashboard/configuracoes/contratos', icon: <IconSettings /> },
+  { label: 'Configurações', href: '/dashboard/configuracoes', icon: <IconSettings /> },
 ];
 
 function DashboardShell({ children }: { children: ReactNode }) {
@@ -39,9 +36,6 @@ function DashboardShell({ children }: { children: ReactNode }) {
     );
     const result = [...baseLinks];
     if (canManageCommercialConfiguration) result.push(...commercialAdminLinks);
-    if (canManageCommercialConfiguration) {
-      result.push({ label: 'Integração Asaas', href: '/dashboard/configuracoes/asaas', icon: <IconSettings /> });
-    }
     result.push({ label: 'Perfil', href: '/dashboard/profile', icon: <IconUser /> });
     return result;
   }, [user]);

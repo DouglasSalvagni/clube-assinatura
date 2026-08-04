@@ -100,14 +100,43 @@ export class CommercialController {
 
   @Post('policies')
   @RequirePermissions(PERMISSIONS.COMMERCIAL_CONFIG_MANAGE)
-  createPolicy(@CurrentUnitId() unitId: string, @Body() dto: CreatePolicyDto) {
-    return this.workflow.savePolicy(unitId, dto);
+  createPolicy(@CurrentUnitId() unitId: string, @Body() dto: CreatePolicyDto, @CurrentUser() user: User) {
+    return this.workflow.savePolicy(unitId, dto, undefined, user.id);
   }
 
   @Patch('policies/:id')
   @RequirePermissions(PERMISSIONS.COMMERCIAL_CONFIG_MANAGE)
-  updatePolicy(@CurrentUnitId() unitId: string, @Param('id') id: string, @Body() dto: CreatePolicyDto) {
-    return this.workflow.savePolicy(unitId, dto, id);
+  updatePolicy(
+    @CurrentUnitId() unitId: string,
+    @Param('id') id: string,
+    @Body() dto: CreatePolicyDto,
+    @CurrentUser() user: User,
+  ) {
+    return this.workflow.savePolicy(unitId, dto, id, user.id);
+  }
+
+  @Post('policies/:id/activate')
+  @RequirePermissions(PERMISSIONS.COMMERCIAL_CONFIG_MANAGE)
+  activatePolicy(@CurrentUnitId() unitId: string, @Param('id') id: string, @CurrentUser() user: User) {
+    return this.workflow.setPolicyActive(unitId, id, true, user.id);
+  }
+
+  @Post('policies/:id/deactivate')
+  @RequirePermissions(PERMISSIONS.COMMERCIAL_CONFIG_MANAGE)
+  deactivatePolicy(@CurrentUnitId() unitId: string, @Param('id') id: string, @CurrentUser() user: User) {
+    return this.workflow.setPolicyActive(unitId, id, false, user.id);
+  }
+
+  @Delete('policies/:id')
+  @RequirePermissions(PERMISSIONS.COMMERCIAL_CONFIG_MANAGE)
+  archivePolicy(@CurrentUnitId() unitId: string, @Param('id') id: string, @CurrentUser() user: User) {
+    return this.workflow.archivePolicy(unitId, id, user.id);
+  }
+
+  @Post('policies/:id/restore')
+  @RequirePermissions(PERMISSIONS.COMMERCIAL_CONFIG_MANAGE)
+  restorePolicy(@CurrentUnitId() unitId: string, @Param('id') id: string, @CurrentUser() user: User) {
+    return this.workflow.restorePolicy(unitId, id, user.id);
   }
 
   @Get('approvals')
@@ -299,6 +328,28 @@ export class CommercialController {
     return this.config.createTemplate(unitId, dto);
   }
 
+  @Patch('contract-templates/:id')
+  @RequirePermissions(PERMISSIONS.COMMERCIAL_CONFIG_MANAGE)
+  updateContractTemplate(
+    @CurrentUnitId() unitId: string,
+    @Param('id') id: string,
+    @Body() dto: CreateContractTemplateDto,
+  ) {
+    return this.config.updateTemplate(unitId, id, dto);
+  }
+
+  @Post('contract-templates/:id/revoke')
+  @RequirePermissions(PERMISSIONS.COMMERCIAL_CONFIG_MANAGE)
+  revokeContractTemplate(@CurrentUnitId() unitId: string, @Param('id') id: string) {
+    return this.config.revokeTemplate(unitId, id);
+  }
+
+  @Post('contract-templates/:id/restore')
+  @RequirePermissions(PERMISSIONS.COMMERCIAL_CONFIG_MANAGE)
+  restoreContractTemplate(@CurrentUnitId() unitId: string, @Param('id') id: string) {
+    return this.config.restoreTemplate(unitId, id);
+  }
+
   @Post('contract-templates/:id/versions')
   @RequirePermissions(PERMISSIONS.COMMERCIAL_CONFIG_MANAGE)
   createContractTemplateVersion(
@@ -307,6 +358,17 @@ export class CommercialController {
     @Body() dto: CreateContractTemplateVersionDto,
   ) {
     return this.config.createTemplateVersion(unitId, id, dto);
+  }
+
+  @Patch('contract-templates/:id/versions/:versionId')
+  @RequirePermissions(PERMISSIONS.COMMERCIAL_CONFIG_MANAGE)
+  updateContractTemplateVersion(
+    @CurrentUnitId() unitId: string,
+    @Param('id') id: string,
+    @Param('versionId') versionId: string,
+    @Body() dto: CreateContractTemplateVersionDto,
+  ) {
+    return this.config.updateTemplateVersion(unitId, id, versionId, dto);
   }
 
   @Post('contract-templates/:id/versions/:versionId/publish')

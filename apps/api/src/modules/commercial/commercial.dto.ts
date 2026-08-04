@@ -3,7 +3,7 @@ import {
   IsArray, IsBoolean, IsDateString, IsEmail, IsEnum, IsIn, IsInt, IsNumber, IsObject, IsOptional,
   IsString, IsUUID, Max, Min, MinLength, ValidateNested,
 } from 'class-validator';
-import { BillingCycle, BillingType, ContractRelationType, CustomerType } from '../../database/entities';
+import { BillingCycle, BillingType, ContractRelationType, CustomerType, UnitRole } from '../../database/entities';
 import { EmptyToUndefined } from '../../common/decorators/empty-to-undefined.decorator';
 
 export class DiscountDto {
@@ -26,7 +26,8 @@ export class SimulateNegotiationDto {
 
 export class CreatePolicyDto {
   @IsString() name: string;
-  @IsOptional() @IsIn(['OWNER','ADMIN','MANAGER','SALES','FINANCE','SUPPORT','VIEWER']) targetRole?: any;
+  @IsOptional() @IsEnum(CustomerType) customerType?: CustomerType;
+  @IsOptional() @IsIn([UnitRole.OWNER, UnitRole.ADMIN, UnitRole.MANAGER, UnitRole.SALES]) targetRole?: UnitRole;
   @EmptyToUndefined() @IsOptional() @IsUUID() targetUserId?: string;
   @IsOptional() @IsNumber() @Min(0) @Max(100) maxDiscountPercent?: number;
   @IsOptional() @IsNumber() @Min(0) maxDiscountAmount?: number;

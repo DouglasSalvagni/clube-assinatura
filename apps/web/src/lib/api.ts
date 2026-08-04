@@ -17,7 +17,13 @@ interface RefreshResponse {
   refreshToken: string;
 }
 
-let refreshPromise: Promise<string | null> | null = null;
+interface RefreshResult {
+  accessToken: string | null;
+  terminal: boolean;
+  error?: Error;
+}
+
+let refreshPromise: Promise<RefreshResult> | null = null;
 
 function gatewayMessage(status: number) {
   if (status === 504) return 'O servidor demorou demais para responder. Verifique a conexão externa e tente novamente.';
@@ -34,31 +40,81 @@ function clearSession() {
   localStorage.removeItem('accessToken');
   localStorage.removeItem('refreshToken');
   localStorage.removeItem('tenantId');
+  localStorage.removeItem('unitId');
 }
 
-async function refreshAccessToken(): Promise<string | null> {
-  if (typeof window === 'undefined') return null;
-  const refreshToken = localStorage.getItem('refreshToken');
-  if (!refreshToken) return null;
+function redirectToLogin() {
+  if (typeof window === 'undefined') return;
+  const loginPath = window.location.pathname.startsWith('/admin') ? '/admin/login' : '/login';
+  if (window.location.pathname !== loginPath) window.location.assign(loginPath);
+}
 
-  if (!refreshPromise) {
-    refreshPromise = fetch(`${API_BASE}/auth/refresh`, {
+function decodeJwtExpiration(token: string): number | null {
+  try {
+    const payload = token.split('.')[1];
+    if (!payload) return null;
+    const normalized = payload.replace(/-/g, '+').replace(/_/g, '/');
+    const decoded = JSON.parse(atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '='))) as { exp?: number };
+    return typeof decoded.exp === 'number' ? decoded.exp * 1000 : null;
+  } catch {
+    return null;
+  }
+}
+
+function expiresSoon(token: string, thresholdSeconds = 60) {
+  const expiresAt = decodeJwtExpiration(token);
+  return expiresAt !== null && expiresAt <= Date.now() + thresholdSeconds * 1000;
+}
+
+async function performRefresh(refreshToken: string): Promise<RefreshResult> {
+  try {
+    const response = await fetch(`${API_BASE}/auth/refresh`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify({ refreshToken }),
-    })
-      .then(async (response) => {
-        if (!response.ok) return null;
-        const data = await response.json() as RefreshResponse;
-        if (!data.accessToken || !data.refreshToken) return null;
-        localStorage.setItem('accessToken', data.accessToken);
-        localStorage.setItem('refreshToken', data.refreshToken);
-        return data.accessToken;
-      })
-      .catch(() => null)
-      .finally(() => {
-        refreshPromise = null;
-      });
+    });
+
+    if (!response.ok) {
+      const terminal = [400, 401, 403].includes(response.status);
+      return {
+        accessToken: null,
+        terminal,
+        error: new Error(terminal
+          ? 'Sua sessão expirou. Entre novamente.'
+          : 'Não foi possível renovar a sessão agora. Tente novamente em instantes.'),
+      };
+    }
+
+    const data = await response.json() as RefreshResponse;
+    if (!data.accessToken || !data.refreshToken) {
+      return {
+        accessToken: null,
+        terminal: false,
+        error: new Error('A API retornou uma renovação de sessão incompleta.'),
+      };
+    }
+
+    localStorage.setItem('accessToken', data.accessToken);
+    localStorage.setItem('refreshToken', data.refreshToken);
+    return { accessToken: data.accessToken, terminal: false };
+  } catch {
+    return {
+      accessToken: null,
+      terminal: false,
+      error: new Error('Não foi possível comunicar com a API para renovar a sessão.'),
+    };
+  }
+}
+
+async function refreshAccessToken(): Promise<RefreshResult> {
+  if (typeof window === 'undefined') return { accessToken: null, terminal: true };
+  const refreshToken = localStorage.getItem('refreshToken');
+  if (!refreshToken) return { accessToken: null, terminal: true };
+
+  if (!refreshPromise) {
+    refreshPromise = performRefresh(refreshToken).finally(() => {
+      refreshPromise = null;
+    });
   }
 
   return refreshPromise;
@@ -90,7 +146,7 @@ async function parseApiError(res: Response): Promise<Error> {
 
 export async function api(path: string, options: ApiOptions = {}) {
   const { tenantId, skipAuthRefresh = false, ...fetchOptions } = options;
-  const token = typeof window !== 'undefined' ? localStorage.getItem('accessToken') : null;
+  let token = typeof window !== 'undefined' ? localStorage.getItem('accessToken') : null;
 
   const storedUnitId = typeof window !== 'undefined' ? localStorage.getItem('tenantId') : null;
   const effectiveTenantId = tenantId !== undefined
@@ -115,17 +171,41 @@ export async function api(path: string, options: ApiOptions = {}) {
     });
   };
 
+  // Renova antes do vencimento para que chamadas em segundo plano não recebam
+  // 401 no exato instante em que o access token expira.
+  if (!skipAuthRefresh && token && expiresSoon(token) && path !== '/auth/refresh' && typeof window !== 'undefined') {
+    const proactiveRefresh = await refreshAccessToken();
+    if (proactiveRefresh.accessToken) {
+      token = proactiveRefresh.accessToken;
+    } else if (proactiveRefresh.terminal) {
+      clearSession();
+      redirectToLogin();
+      throw proactiveRefresh.error || new Error('Sua sessão expirou.');
+    }
+    // Falhas transitórias não apagam a sessão. A chamada ainda é tentada e a
+    // renovação poderá ser repetida caso a API realmente responda 401.
+  }
+
   let res = await makeRequest(token);
 
   if (res.status === 401 && !skipAuthRefresh && path !== '/auth/refresh' && typeof window !== 'undefined') {
-    const renewedToken = await refreshAccessToken();
-    if (renewedToken) res = await makeRequest(renewedToken);
+    const renewed = await refreshAccessToken();
+    if (renewed.accessToken) {
+      res = await makeRequest(renewed.accessToken);
+    } else if (renewed.terminal) {
+      clearSession();
+      redirectToLogin();
+      throw renewed.error || new Error('Sua sessão expirou.');
+    } else {
+      // Uma indisponibilidade momentânea do endpoint de refresh não deve
+      // destruir uma sessão válida de 30 dias.
+      throw renewed.error || new Error('Não foi possível renovar a sessão agora.');
+    }
   }
 
   if (res.status === 401 && typeof window !== 'undefined') {
     clearSession();
-    const loginPath = window.location.pathname.startsWith('/admin') ? '/admin/login' : '/login';
-    if (window.location.pathname !== loginPath) window.location.href = loginPath;
+    redirectToLogin();
   }
 
   if (!res.ok) throw await parseApiError(res);

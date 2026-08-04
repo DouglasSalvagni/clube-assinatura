@@ -1,4 +1,4 @@
-import { BillingType, NegotiationPolicy, UnitRole } from '../../database/entities';
+import { BillingType, CustomerType, NegotiationPolicy, UnitRole } from '../../database/entities';
 
 export type PolicyEvaluation = {
   allowed: boolean;
@@ -19,6 +19,8 @@ export function evaluateNegotiationPolicies(
 ): PolicyEvaluation {
   const applicable = policies.filter((policy) =>
     policy.active
+    && !policy.archivedAt
+    && (!policy.customerType || policy.customerType === negotiation?.customerType)
     && (!policy.targetUserId || policy.targetUserId === userId)
     && (!policy.targetRole || policy.targetRole === role));
 
@@ -42,9 +44,12 @@ export function evaluateNegotiationPolicies(
     violations.push(`Desconto nominal de R$ ${discountAmount.toFixed(2)} supera o limite de R$ ${maxAmount.toFixed(2)}.`);
   }
 
-  const minimumPrices = applicable
-    .map((policy) => policy.minUnitPrice == null ? null : Number(policy.minUnitPrice))
-    .filter((value): value is number => value !== null);
+  const companyNegotiation = negotiation?.customerType === CustomerType.COMPANY;
+  const minimumPrices = companyNegotiation
+    ? applicable
+        .map((policy) => policy.minUnitPrice == null ? null : Number(policy.minUnitPrice))
+        .filter((value): value is number => value !== null)
+    : [];
   const minimumUnitPrice = minimumPrices.length ? Math.max(...minimumPrices) : null;
   if (minimumUnitPrice != null && Number(negotiation?.pricing?.unitPrice || 0) < minimumUnitPrice) {
     violations.push(`Preço unitário abaixo do mínimo de R$ ${minimumUnitPrice.toFixed(2)}.`);
@@ -69,9 +74,11 @@ export function evaluateNegotiationPolicies(
     violations.push(`Forma de pagamento não permitida: ${invalidBillingTypes.join(', ')}.`);
   }
 
-  const maxLivesLimits = applicable
-    .map((policy) => Number(policy.rules?.maxLives || 0))
-    .filter((value) => value > 0);
+  const maxLivesLimits = companyNegotiation
+    ? applicable
+        .map((policy) => Number(policy.rules?.maxLives || 0))
+        .filter((value) => value > 0)
+    : [];
   const maxLives = maxLivesLimits.length ? Math.min(...maxLivesLimits) : null;
   const contractedLives = Number(negotiation?.participants?.contractedLives || 0);
   if (maxLives != null && contractedLives > maxLives) {

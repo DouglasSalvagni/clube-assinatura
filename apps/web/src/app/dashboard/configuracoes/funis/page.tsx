@@ -195,17 +195,29 @@ export default function PipelinesPage() {
   }
 
   return (
-    <div className="space-y-6 p-8">
+    <div className="space-y-6">
       {error && <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</div>}
       {success && <div className="rounded-lg border border-green-200 bg-green-50 p-3 text-sm text-green-700">{success}</div>}
 
-      <section className="rounded-xl border border-edge bg-surface-elevated p-6">
+      <nav className="flex flex-wrap gap-2 rounded-xl border border-edge bg-surface-elevated p-2 text-sm">
+        <a href="#funis-cadastrados" className="rounded-lg px-3 py-2 text-ink-secondary hover:bg-surface-canvas hover:text-ink">Funis cadastrados</a>
+        <a href="#cadastro-funil" className="rounded-lg px-3 py-2 text-ink-secondary hover:bg-surface-canvas hover:text-ink">Criar ou editar funil</a>
+        <a href="#cadastro-etapa" className="rounded-lg px-3 py-2 text-ink-secondary hover:bg-surface-canvas hover:text-ink">Criar ou editar etapa</a>
+      </nav>
+
+      <section id="cadastro-funil" className="scroll-mt-24 rounded-xl border border-edge bg-surface-elevated p-6">
+        <div className="mb-4 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-800">
+          O funil organiza o Kanban. As etapas podem apenas representar o processo comercial ou, opcionalmente, atualizar o status operacional da negociação.
+        </div>
         <div className="flex items-center justify-between gap-3">
           <h2 className="text-lg font-semibold">{editingPipelineId ? 'Editar funil' : 'Novo funil'}</h2>
           {editingPipelineId && <button type="button" onClick={resetPipelineForm} className="text-sm text-ink-tertiary">Cancelar edição</button>}
         </div>
         <form onSubmit={savePipeline} className="mt-4 grid gap-3 md:grid-cols-2">
-          <input required placeholder="Nome do funil" value={pipelineForm.name} onChange={e => setPipelineForm({ ...pipelineForm, name: e.target.value })} className="rounded-lg border px-3 py-2" />
+          <label className="text-sm">
+            <span className="font-medium">Nome do funil</span>
+            <input required placeholder="Ex.: Vendas gerais" value={pipelineForm.name} onChange={e => setPipelineForm({ ...pipelineForm, name: e.target.value })} className="mt-1 w-full rounded-lg border px-3 py-2" />
+          </label>
           <label className="flex items-center gap-2 rounded-lg border px-3 py-2 text-sm">
             <input type="checkbox" checked={pipelineForm.isDefault} onChange={e => setPipelineForm({ ...pipelineForm, isDefault: e.target.checked })} />
             Definir como funil padrão
@@ -216,7 +228,7 @@ export default function PipelinesPage() {
         </form>
       </section>
 
-      <section className="rounded-xl border border-edge bg-surface-elevated p-6">
+      <section id="cadastro-etapa" className="scroll-mt-24 rounded-xl border border-edge bg-surface-elevated p-6">
         <div className="flex items-center justify-between gap-3">
           <h2 className="text-lg font-semibold">{editingStageId ? 'Editar etapa' : 'Nova etapa'}</h2>
           {editingStageId && <button type="button" onClick={() => resetStageForm()} className="text-sm text-ink-tertiary">Cancelar edição</button>}
@@ -261,7 +273,7 @@ export default function PipelinesPage() {
         </form>
       </section>
 
-      <section className="rounded-xl border border-edge bg-surface-elevated p-6">
+      <section id="funis-cadastrados" className="scroll-mt-24 rounded-xl border border-edge bg-surface-elevated p-6">
         <h2 className="text-lg font-semibold">Funis configurados</h2>
         <div className="mt-4 space-y-4">
           {pipelines.map(pipeline => (

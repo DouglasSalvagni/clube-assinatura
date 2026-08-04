@@ -6,6 +6,7 @@ import { api, API_BASE } from '@/lib/api';
 import { usePageTitle } from '@/lib/page-title-context';
 import { useDialog } from '@/lib/dialog-context';
 import { formatPhone, formatCpfCnpj, formatCep, maskCpfCnpj, maskPhone, maskCep, stripMask } from '@/lib/format';
+import { CurrencyInput } from '@/components/masked-number-input';
 import { OpportunityWorkspaceNav } from '@/components/opportunity-workspace-nav';
 
 const cycleOptions = [
@@ -268,6 +269,13 @@ export default function OportunidadeDetailPage() {
               className="mt-0.5 w-full rounded-lg border border-edge bg-surface-input px-3 py-1.5 text-sm text-ink focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/20"
               value={maskPhone(val || '')}
               onChange={(e) => setForm({ ...form, telefone: stripMask(e.target.value).slice(0, 11) })}
+            />
+          ) : type === 'currency' ? (
+            <CurrencyInput
+              className="mt-0.5 w-full rounded-lg border border-edge bg-surface-input px-3 py-1.5 text-sm text-ink focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/20"
+              value={val || ''}
+              onValueChange={(value) => setForm({ ...form, [key]: value })}
+              placeholder="R$ 0,00"
             />
           ) : (
             <input

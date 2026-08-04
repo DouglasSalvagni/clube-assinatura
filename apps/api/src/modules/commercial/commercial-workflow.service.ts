@@ -44,53 +44,119 @@ export class CommercialWorkflowService {
   ) {}
 
   listPolicies(unitId: string) {
-    return this.policies.find({ where: { unitId }, order: { name: 'ASC' } });
+    return this.policies.find({
+      where: { unitId },
+      order: { active: 'DESC', name: 'ASC' },
+    });
   }
 
-  async savePolicy(unitId: string, dto: CreatePolicyDto, id?: string) {
+  async savePolicy(unitId: string, dto: CreatePolicyDto, id?: string, actorUserId?: string) {
     const current = id ? await this.policies.findOne({ where: { unitId, id } }) : null;
     if (id && !current) throw new NotFoundException('Política não encontrada.');
-    const before = current ? {
-      name: current.name,
-      targetRole: current.targetRole,
-      targetUserId: current.targetUserId,
-      maxDiscountPercent: current.maxDiscountPercent,
-      maxDiscountAmount: current.maxDiscountAmount,
-      minUnitPrice: current.minUnitPrice,
-      allowedBillingTypes: current.allowedBillingTypes,
-      active: current.active,
-      rules: current.rules,
-    } : null;
-    const entity = current || this.policies.create({ unitId });
+    const before = current ? this.policySnapshot(current) : null;
+    const entity = current || this.policies.create({ unitId, archivedAt: null });
+    const rules = { ...(dto.rules || {}) };
+    const customerType = dto.customerType || null;
+    if (customerType === CustomerType.PERSON) delete rules.maxLives;
     Object.assign(entity, {
       name: dto.name,
+      customerType,
       targetRole: dto.targetRole || null,
       targetUserId: dto.targetUserId || null,
       maxDiscountPercent: Number(dto.maxDiscountPercent || 0).toFixed(2),
       maxDiscountAmount: dto.maxDiscountAmount == null ? null : Number(dto.maxDiscountAmount).toFixed(2),
-      minUnitPrice: dto.minUnitPrice == null ? null : Number(dto.minUnitPrice).toFixed(2),
+      minUnitPrice: customerType === CustomerType.PERSON || dto.minUnitPrice == null
+        ? null
+        : Number(dto.minUnitPrice).toFixed(2),
       allowedBillingTypes: dto.allowedBillingTypes || [],
-      active: dto.active !== false,
-      rules: dto.rules || {},
+      active: entity.archivedAt ? false : dto.active !== false,
+      rules,
     });
     const saved = await this.policies.save(entity);
-    await this.audit(unitId, null, id ? 'negotiation_policy.updated' : 'negotiation_policy.created', 'negotiation_policy', saved.id, before, {
-      name: saved.name,
-      targetRole: saved.targetRole,
-      targetUserId: saved.targetUserId,
-      maxDiscountPercent: saved.maxDiscountPercent,
-      maxDiscountAmount: saved.maxDiscountAmount,
-      minUnitPrice: saved.minUnitPrice,
-      allowedBillingTypes: saved.allowedBillingTypes,
-      active: saved.active,
-      rules: saved.rules,
-    });
+    await this.audit(
+      unitId,
+      actorUserId || null,
+      id ? 'negotiation_policy.updated' : 'negotiation_policy.created',
+      'negotiation_policy',
+      saved.id,
+      before,
+      this.policySnapshot(saved),
+    );
     return saved;
   }
 
-  async evaluate(unitId: string, userId: string, role: UnitRole | null, negotiation: any) {
+  async setPolicyActive(unitId: string, id: string, active: boolean, actorUserId?: string) {
+    const policy = await this.policies.findOne({ where: { unitId, id } });
+    if (!policy) throw new NotFoundException('Política não encontrada.');
+    if (policy.archivedAt) throw new ConflictException('Restaure a política antes de ativá-la ou desativá-la.');
+    if (policy.active === active) return policy;
+    const before = this.policySnapshot(policy);
+    policy.active = active;
+    const saved = await this.policies.save(policy);
+    await this.audit(
+      unitId,
+      actorUserId || null,
+      active ? 'negotiation_policy.activated' : 'negotiation_policy.deactivated',
+      'negotiation_policy',
+      saved.id,
+      before,
+      this.policySnapshot(saved),
+    );
+    return saved;
+  }
+
+  async archivePolicy(unitId: string, id: string, actorUserId?: string) {
+    const policy = await this.policies.findOne({ where: { unitId, id } });
+    if (!policy) throw new NotFoundException('Política não encontrada.');
+    if (policy.archivedAt) return policy;
+    const before = this.policySnapshot(policy);
+    policy.active = false;
+    policy.archivedAt = new Date();
+    const saved = await this.policies.save(policy);
+    await this.audit(unitId, actorUserId || null, 'negotiation_policy.archived', 'negotiation_policy', saved.id, before, this.policySnapshot(saved));
+    return saved;
+  }
+
+  async restorePolicy(unitId: string, id: string, actorUserId?: string) {
+    const policy = await this.policies.findOne({ where: { unitId, id } });
+    if (!policy) throw new NotFoundException('Política não encontrada.');
+    if (!policy.archivedAt) return policy;
+    const before = this.policySnapshot(policy);
+    policy.archivedAt = null;
+    policy.active = false;
+    const saved = await this.policies.save(policy);
+    await this.audit(unitId, actorUserId || null, 'negotiation_policy.restored', 'negotiation_policy', saved.id, before, this.policySnapshot(saved));
+    return saved;
+  }
+
+  private policySnapshot(policy: NegotiationPolicy) {
+    return {
+      name: policy.name,
+      customerType: policy.customerType,
+      targetRole: policy.targetRole,
+      targetUserId: policy.targetUserId,
+      maxDiscountPercent: policy.maxDiscountPercent,
+      maxDiscountAmount: policy.maxDiscountAmount,
+      minUnitPrice: policy.minUnitPrice,
+      allowedBillingTypes: policy.allowedBillingTypes,
+      active: policy.active,
+      archivedAt: policy.archivedAt,
+      rules: policy.rules,
+    };
+  }
+
+  async evaluate(
+    unitId: string,
+    userId: string,
+    role: UnitRole | null,
+    negotiation: any,
+    customerType?: CustomerType,
+  ) {
     const policies = await this.policies.find({ where: { unitId, active: true } });
-    return evaluateNegotiationPolicies(policies, userId, role, negotiation);
+    return evaluateNegotiationPolicies(policies, userId, role, {
+      ...(negotiation || {}),
+      customerType: negotiation?.customerType || customerType || null,
+    });
   }
 
   async evaluateOpportunity(
@@ -103,7 +169,7 @@ export class CommercialWorkflowService {
     const opportunity = await this.opportunities.findOne({ where: { unitId, id: opportunityId } });
     if (!opportunity) throw new NotFoundException('Oportunidade não encontrada.');
     await this.assertOpportunityAccess(opportunity, userId, role, globalRole);
-    const evaluation = await this.evaluate(unitId, userId, role, opportunity.negotiationSnapshot);
+    const evaluation = await this.evaluate(unitId, userId, role, opportunity.negotiationSnapshot, opportunity.customerType);
     const approval = await this.currentApproval(unitId, opportunityId, opportunity.negotiationSnapshot);
     const approvedException = approval?.status === ApprovalStatus.APPROVED;
     const companyApprovalRequired = opportunity.customerType === CustomerType.COMPANY && !approvedException;
@@ -122,7 +188,7 @@ export class CommercialWorkflowService {
     const opportunity = await this.opportunities.findOne({ where: { unitId, id: opportunityId } });
     if (!opportunity) throw new NotFoundException('Oportunidade não encontrada.');
     await this.assertOpportunityAccess(opportunity, userId, role, GlobalRole.STANDARD);
-    const evaluation = await this.evaluate(unitId, userId, role, opportunity.negotiationSnapshot);
+    const evaluation = await this.evaluate(unitId, userId, role, opportunity.negotiationSnapshot, opportunity.customerType);
     if (evaluation.allowed && opportunity.customerType !== CustomerType.COMPANY) {
       throw new BadRequestException('A negociação está dentro dos limites e não exige aprovação.');
     }
@@ -367,7 +433,7 @@ export class CommercialWorkflowService {
     if (!opportunity) throw new NotFoundException('Oportunidade não encontrada.');
     if (userId) {
       await this.assertOpportunityAccess(opportunity, userId, role || null, globalRole || GlobalRole.STANDARD);
-      const evaluation = await this.evaluate(unitId, userId, role || null, opportunity.negotiationSnapshot);
+      const evaluation = await this.evaluate(unitId, userId, role || null, opportunity.negotiationSnapshot, opportunity.customerType);
       const approval = await this.currentApproval(unitId, opportunityId, opportunity.negotiationSnapshot);
       const hasApprovedException = approval?.status === ApprovalStatus.APPROVED;
       if (!evaluation.allowed && !hasApprovedException) {

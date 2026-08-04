@@ -40,7 +40,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const data = await api('/auth/me');
       setUser(data);
     } catch {
-      setUser(null);
+      // Falhas transitórias da API não devem apagar o usuário da interface.
+      // Quando a sessão realmente expira, api() remove os tokens e redireciona.
+      if (!localStorage.getItem('accessToken') && !localStorage.getItem('refreshToken')) {
+        setUser(null);
+      }
     } finally {
       setLoading(false);
     }

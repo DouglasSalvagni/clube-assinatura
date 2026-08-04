@@ -398,6 +398,7 @@ export class ContractTemplateVersion extends UnitScopedEntity {
 
 @Entity('commercial_offer_versions')
 @Index(['unitId', 'offerId', 'version'], { unique: true })
+@Index('UQ_commercial_offer_versions_current', ['offerId'], { unique: true, where: "\"status\" = 'PUBLISHED'" })
 export class CommercialOfferVersion extends UnitScopedEntity {
   @Column({ name: 'offer_id', type: 'uuid' }) offerId: string;
   @Column({ type: 'int' }) version: number;
@@ -442,6 +443,7 @@ export class CommercialPipelineStage extends UnitScopedEntity {
 @Index(['unitId', 'name'])
 export class NegotiationPolicy extends UnitScopedEntity {
   @Column({ type: 'varchar', length: 160 }) name: string;
+  @Column({ name: 'customer_type', type: 'varchar', length: 30, nullable: true }) customerType: CustomerType | null;
   @Column({ name: 'target_role', type: 'varchar', length: 40, nullable: true }) targetRole: UnitRole | null;
   @Column({ name: 'target_user_id', type: 'uuid', nullable: true }) targetUserId: string | null;
   @Column({ name: 'max_discount_percent', type: 'numeric', precision: 6, scale: 2, default: 0 }) maxDiscountPercent: string;
@@ -449,6 +451,7 @@ export class NegotiationPolicy extends UnitScopedEntity {
   @Column({ name: 'min_unit_price', type: 'numeric', precision: 14, scale: 2, nullable: true }) minUnitPrice: string | null;
   @Column({ name: 'allowed_billing_types', type: 'jsonb', default: () => "'[]'::jsonb" }) allowedBillingTypes: BillingType[];
   @Column({ type: 'boolean', default: true }) active: boolean;
+  @Column({ name: 'archived_at', type: 'timestamptz', nullable: true }) archivedAt: Date | null;
   @Column({ type: 'jsonb', default: () => "'{}'::jsonb" }) rules: Record<string, any>;
 }
 

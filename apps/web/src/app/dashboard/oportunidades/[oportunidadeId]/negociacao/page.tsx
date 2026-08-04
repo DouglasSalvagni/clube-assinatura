@@ -5,6 +5,7 @@ import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { usePageTitle } from '@/lib/page-title-context';
 import { useAuth } from '@/lib/auth-context';
+import { CurrencyInput, PercentageInput } from '@/components/masked-number-input';
 import { OpportunityWorkspaceNav } from '@/components/opportunity-workspace-nav';
 import { billingTypeLabels, commercialStatusLabels } from '@/lib/commercial-labels';
 
@@ -465,11 +466,11 @@ export default function NegotiationWorkspacePage() {
                 <>
                   <label className="text-sm">
                     <span>Valor do titular</span>
-                    <input type="number" min="0" step="0.01" value={form.holderAmount} onChange={e => setForm({ ...form, holderAmount: e.target.value })} className="mt-1 w-full rounded-lg border px-3 py-2" />
+                    <CurrencyInput value={form.holderAmount} onValueChange={(value) => setForm({ ...form, holderAmount: value })} className="mt-1 w-full rounded-lg border px-3 py-2" placeholder="R$ 0,00" />
                   </label>
                   <label className="text-sm">
                     <span>Valor por dependente</span>
-                    <input type="number" min="0" step="0.01" value={form.dependentAmount} onChange={e => setForm({ ...form, dependentAmount: e.target.value })} className="mt-1 w-full rounded-lg border px-3 py-2" />
+                    <CurrencyInput value={form.dependentAmount} onValueChange={(value) => setForm({ ...form, dependentAmount: value })} className="mt-1 w-full rounded-lg border px-3 py-2" placeholder="R$ 0,00" />
                   </label>
                   <label className="text-sm">
                     <span>Quantidade de dependentes</span>
@@ -483,7 +484,7 @@ export default function NegotiationWorkspacePage() {
                 <>
                   <label className="text-sm">
                     <span>Preço por vida</span>
-                    <input type="number" min="0" step="0.01" value={form.unitPrice} onChange={e => setForm({ ...form, unitPrice: e.target.value })} className="mt-1 w-full rounded-lg border px-3 py-2" />
+                    <CurrencyInput value={form.unitPrice} onValueChange={(value) => setForm({ ...form, unitPrice: value })} className="mt-1 w-full rounded-lg border px-3 py-2" placeholder="R$ 0,00" />
                   </label>
                   <label className="text-sm">
                     <span>Vidas contratadas</span>
@@ -494,7 +495,7 @@ export default function NegotiationWorkspacePage() {
 
               <label className="text-sm">
                 <span>Desconto percentual</span>
-                <input type="number" min="0" max="100" step="0.01" value={form.discountPercent} onChange={e => setForm({ ...form, discountPercent: e.target.value })} className="mt-1 w-full rounded-lg border px-3 py-2" />
+                <PercentageInput value={form.discountPercent} onValueChange={(value) => setForm({ ...form, discountPercent: value })} className="mt-1 w-full rounded-lg border px-3 py-2" placeholder="0,00%" />
               </label>
             </div>
             <button disabled={busy || !form.allowedBillingTypes.length} className="mt-5 rounded-lg bg-brand px-4 py-2 text-white disabled:opacity-50">

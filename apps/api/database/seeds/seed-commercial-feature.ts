@@ -115,28 +115,53 @@ async function run() {
   }
 
   const policyRepo = AppDataSource.getRepository(NegotiationPolicy);
-  async function ensurePolicy(name: string, targetRole: UnitRole | null, targetUserId: string | null, maxPercent: string, maxAmount: string | null, minPrice: string | null) {
+  async function ensurePolicy(
+    name: string,
+    customerType: CustomerType | null,
+    targetRole: UnitRole | null,
+    targetUserId: string | null,
+    maxPercent: string,
+    maxAmount: string | null,
+    minPrice: string | null,
+  ) {
     let policy = await policyRepo.findOne({ where: { unitId: currentUnit.id, name } });
     const values = {
       unitId: currentUnit.id,
       name,
+      customerType,
       targetRole,
       targetUserId,
       maxDiscountPercent: maxPercent,
       maxDiscountAmount: maxAmount,
       minUnitPrice: minPrice,
       allowedBillingTypes: [BillingType.CREDIT_CARD, BillingType.BOLETO],
-      pricingRules: { allowMonthlyBoleto: true },
       active: true,
+      archivedAt: null,
       rules: { seeded: true, requireApprovalAboveLimit: true },
     };
     if (!policy) policy = policyRepo.create(values);
     else Object.assign(policy, values);
     return policyRepo.save(policy);
   }
-  await ensurePolicy('Política padrão dos negociadores', UnitRole.SALES, null, '5.00', '500.00', '35.00');
-  await ensurePolicy('Alçada do gerente comercial', UnitRole.MANAGER, null, '15.00', '2500.00', '30.00');
-  await ensurePolicy('Exceção individual do negociador de testes', null, sales.id, '7.00', '700.00', '34.00');
+  await ensurePolicy('Política PF padrão dos negociadores', CustomerType.PERSON, UnitRole.SALES, null, '0.00', null, null);
+  await ensurePolicy('Política PJ padrão dos negociadores', CustomerType.COMPANY, UnitRole.SALES, null, '5.00', '500.00', '35.00');
+  await ensurePolicy('Alçada PJ do gerente comercial', CustomerType.COMPANY, UnitRole.MANAGER, null, '15.00', '2500.00', '30.00');
+  await ensurePolicy('Exceção PJ do negociador de testes', CustomerType.COMPANY, null, sales.id, '7.00', '700.00', '34.00');
+
+  const legacyPolicyNames = [
+    'Política padrão dos negociadores',
+    'Alçada do gerente comercial',
+    'Exceção individual do negociador de testes',
+  ];
+  for (const legacyName of legacyPolicyNames) {
+    const legacy = await policyRepo.findOne({ where: { unitId: currentUnit.id, name: legacyName } });
+    if (legacy) {
+      legacy.active = false;
+      legacy.archivedAt = legacy.archivedAt || new Date();
+      legacy.rules = { ...(legacy.rules || {}), replacedByScopedPolicies: true };
+      await policyRepo.save(legacy);
+    }
+  }
 
   const offerRepo = AppDataSource.getRepository(CommercialOffer);
   const offerVersionRepo = AppDataSource.getRepository(CommercialOfferVersion);

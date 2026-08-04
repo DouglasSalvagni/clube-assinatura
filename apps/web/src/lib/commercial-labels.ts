@@ -16,8 +16,8 @@ export const offerStatusLabels: Record<string, string> = {
 
 export const offerVersionStatusLabels: Record<string, string> = {
   DRAFT: 'Rascunho',
-  PUBLISHED: 'Publicada',
-  RETIRED: 'Encerrada',
+  PUBLISHED: 'Vigente',
+  RETIRED: 'Histórica',
 };
 
 export const billingCycleLabels: Record<string, string> = {
@@ -31,4 +31,20 @@ export const billingTypeLabels: Record<string, string> = {
   CREDIT_CARD: 'Cartão de crédito',
   BOLETO: 'Boleto',
   PIX: 'Pix',
+};
+
+export const customerTypeLabels: Record<string, string> = {
+  PERSON: 'Pessoa física',
+  COMPANY: 'Pessoa jurídica',
+  ALL: 'Pessoa física e jurídica',
+};
+
+export const unitRoleLabels: Record<string, string> = {
+  OWNER: 'Proprietário da sede',
+  ADMIN: 'Administrador',
+  MANAGER: 'Gerente',
+  SALES: 'Negociador / Comercial',
+  FINANCE: 'Financeiro',
+  SUPPORT: 'Suporte',
+  VIEWER: 'Somente leitura',
 };

@@ -285,7 +285,7 @@ export default function AsaasSettingsPage() {
   }
 
   return (
-    <div className="space-y-6 p-8">
+    <div className="space-y-6">
       <div>
         <h2 className="text-xl font-semibold text-ink">Conta Asaas da unidade</h2>
         <p className="mt-1 max-w-3xl text-sm text-ink-tertiary">

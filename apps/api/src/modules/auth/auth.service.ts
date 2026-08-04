@@ -48,25 +48,40 @@ export class AuthService {
   }
 
   async refresh(rawToken: string) {
-    const stored = await this.refreshRepo.findOne({ where: { tokenHash: this.hashToken(rawToken), revokedAt: IsNull() } });
-    if (!stored || stored.expiresAt.getTime() <= Date.now()) throw new UnauthorizedException('Refresh token inválido.');
+    const stored = await this.refreshRepo.findOne({
+      where: { tokenHash: this.hashToken(rawToken), revokedAt: IsNull() },
+    });
+    if (!stored || stored.expiresAt.getTime() <= Date.now()) {
+      throw new UnauthorizedException('Refresh token inválido.');
+    }
+
     try {
-      const payload = await this.jwt.verifyAsync<{ sub: string }>(rawToken.split('.').slice(1).join('.'), { secret: process.env.JWT_REFRESH_SECRET || 'development-refresh-secret-change-me' });
+      const jwtToken = rawToken.split('.').slice(1).join('.');
+      const payload = await this.jwt.verifyAsync<{ sub: string; kind?: string }>(jwtToken, {
+        secret: process.env.JWT_REFRESH_SECRET || 'development-refresh-secret-change-me',
+      });
+      if (payload.kind !== 'refresh' || payload.sub !== stored.userId) {
+        throw new UnauthorizedException();
+      }
+
       const user = await this.userRepo.findOne({ where: { id: payload.sub, active: true } });
       if (!user) throw new UnauthorizedException();
-      stored.revokedAt = new Date();
-      await this.refreshRepo.save(stored);
-      return this.loginWithoutPassword(user);
+
+      // O refresh token permanece válido até logout ou expiração. Não rotacioná-lo
+      // evita que requisições simultâneas ou abas diferentes invalidem a sessão
+      // umas das outras enquanto o access token é renovado.
+      const accessToken = await this.jwt.signAsync({ sub: user.id }, {
+        secret: process.env.JWT_ACCESS_SECRET || 'development-access-secret-change-me',
+        expiresIn: process.env.JWT_ACCESS_TTL || '15m',
+      });
+      return {
+        accessToken,
+        refreshToken: rawToken,
+        expiresIn: process.env.JWT_ACCESS_TTL || '15m',
+      };
     } catch {
       throw new UnauthorizedException('Refresh token inválido.');
     }
-  }
-
-  private async loginWithoutPassword(user: User) {
-    const accessToken = await this.jwt.signAsync({ sub: user.id }, { secret: process.env.JWT_ACCESS_SECRET || 'development-access-secret-change-me', expiresIn: process.env.JWT_ACCESS_TTL || '15m' });
-    const refreshToken = `${randomBytes(32).toString('hex')}.${await this.jwt.signAsync({ sub: user.id, kind: 'refresh' }, { secret: process.env.JWT_REFRESH_SECRET || 'development-refresh-secret-change-me', expiresIn: `${Number(process.env.JWT_REFRESH_TTL_DAYS || 30)}d` })}`;
-    await this.refreshRepo.save(this.refreshRepo.create({ userId: user.id, tokenHash: this.hashToken(refreshToken), expiresAt: new Date(Date.now() + Number(process.env.JWT_REFRESH_TTL_DAYS || 30) * 86_400_000), revokedAt: null, userAgent: null, ipAddress: null }));
-    return { accessToken, refreshToken, expiresIn: process.env.JWT_ACCESS_TTL || '15m' };
   }
 
   async logout(rawToken: string): Promise<void> {
