@@ -2,7 +2,9 @@
   "name": "subscription-club-platform",
   "version": "1.0.0",
   "private": true,
-  "workspaces": ["apps/*"],
+  "workspaces": [
+    "apps/*"
+  ],
   "scripts": {
     "build": "npm run build -w @club-platform/api && npm run build -w @club-platform/worker && npm run build -w @club-platform/web",
     "dev:api": "npm run start:dev -w @club-platform/api",
@@ -13,7 +15,13 @@
     "test": "npm run test -w @club-platform/api",
     "migration:run": "npm run migration:run -w @club-platform/api",
     "migration:revert": "npm run migration:revert -w @club-platform/api",
-    "seed": "npm run seed -w @club-platform/api"
+    "seed": "npm run seed -w @club-platform/api",
+    "seed:test-users": "npm run seed:test-users -w @club-platform/api",
+    "seed:commercial-feature": "npm run seed:commercial-feature -w @club-platform/api",
+    "seed:test-all": "npm run seed:test-all -w @club-platform/api"
   },
-  "engines": { "node": ">=20.0.0", "npm": ">=10.0.0" }
+  "engines": {
+    "node": ">=20.0.0",
+    "npm": ">=10.0.0"
+  }
 }

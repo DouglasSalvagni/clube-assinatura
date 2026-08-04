@@ -1,9 +1,10 @@
 import 'reflect-metadata';
 import { Logger, ValidationPipe } from '@nestjs/common';
-import { NestFactory } from '@nestjs/core';
+import { HttpAdapterHost, NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import helmet from 'helmet';
 import { AppModule } from './app.module';
+import { HttpExceptionLoggingFilter } from './common/filters/http-exception-logging.filter';
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create(AppModule, { bufferLogs: true });
@@ -13,6 +14,9 @@ async function bootstrap(): Promise<void> {
     origin: (process.env.CORS_ORIGINS || 'http://localhost:4002').split(',').map((item) => item.trim()),
     credentials: true,
   });
+  app.useGlobalFilters(
+    new HttpExceptionLoggingFilter(app.get(HttpAdapterHost).httpAdapter),
+  );
   app.useGlobalPipes(new ValidationPipe({
     whitelist: true,
     forbidNonWhitelisted: true,

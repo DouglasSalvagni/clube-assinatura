@@ -2,14 +2,14 @@
 
 import Sidebar from '@/components/sidebar';
 import Header from '@/components/header';
-import { AuthProvider } from '@/lib/auth-context';
+import { AuthProvider, useAuth } from '@/lib/auth-context';
 import { ThemeProvider } from '@/lib/theme-context';
 import { PageTitleProvider } from '@/lib/page-title-context';
 import { DialogProvider } from '@/lib/dialog-context';
-import { ReactNode } from 'react';
+import { ReactNode, useMemo } from 'react';
 import { IconDashboard, IconHeart, IconUser, IconBriefcase, IconCash, IconChart, IconUsers, IconTeam, IconSettings } from '@/components/icons';
 
-const links = [
+const baseLinks = [
   { label: 'Dashboard', href: '/dashboard', icon: <IconDashboard /> },
   { label: 'Assinaturas', href: '/dashboard/vidas', icon: <IconHeart /> },
   { label: 'Oportunidades', href: '/dashboard/oportunidades', icon: <IconBriefcase /> },
@@ -17,24 +17,53 @@ const links = [
   { label: 'Relatórios', href: '/dashboard/relatorios', icon: <IconChart /> },
   { label: 'Times', href: '/dashboard/times', icon: <IconTeam /> },
   { label: 'Usuários', href: '/dashboard/usuarios', icon: <IconUsers /> },
-  { label: 'Integração Asaas', href: '/dashboard/configuracoes/asaas', icon: <IconSettings /> },
-  { label: 'Perfil', href: '/dashboard/profile', icon: <IconUser /> },
 ];
 
-export default function DashboardLayout({ children }: { children: ReactNode }) {
+const commercialAdminLinks = [
+  { label: 'Políticas comerciais', href: '/dashboard/configuracoes/comercial', icon: <IconSettings /> },
+  { label: 'Ofertas e preços', href: '/dashboard/configuracoes/ofertas', icon: <IconSettings /> },
+  { label: 'Funis comerciais', href: '/dashboard/configuracoes/funis', icon: <IconSettings /> },
+  { label: 'Modelos contratuais', href: '/dashboard/configuracoes/contratos', icon: <IconSettings /> },
+];
+
+function DashboardShell({ children }: { children: ReactNode }) {
+  const { user } = useAuth();
   const productName = process.env.NEXT_PUBLIC_PRODUCT_NAME || 'ClubFlow';
+  const links = useMemo(() => {
+    const unitId = typeof window !== 'undefined'
+      ? localStorage.getItem('tenantId') || localStorage.getItem('unitId')
+      : null;
+    const membership = user?.memberships?.find((item) => item.unitId === unitId && item.active);
+    const canManageCommercialConfiguration = Boolean(
+      user?.is_platform_admin || membership?.role === 'OWNER' || membership?.role === 'ADMIN',
+    );
+    const result = [...baseLinks];
+    if (canManageCommercialConfiguration) result.push(...commercialAdminLinks);
+    if (canManageCommercialConfiguration) {
+      result.push({ label: 'Integração Asaas', href: '/dashboard/configuracoes/asaas', icon: <IconSettings /> });
+    }
+    result.push({ label: 'Perfil', href: '/dashboard/profile', icon: <IconUser /> });
+    return result;
+  }, [user]);
+
+  return (
+    <div className="flex min-h-screen bg-surface-canvas text-ink">
+      <Sidebar links={links} title={productName} />
+      <div className="flex flex-1 flex-col">
+        <Header />
+        <main className="flex-1">{children}</main>
+      </div>
+    </div>
+  );
+}
+
+export default function DashboardLayout({ children }: { children: ReactNode }) {
   return (
     <AuthProvider>
       <ThemeProvider>
         <PageTitleProvider>
           <DialogProvider>
-            <div className="flex min-h-screen bg-surface-canvas text-ink">
-              <Sidebar links={links} title={productName} />
-              <div className="flex flex-1 flex-col">
-                <Header />
-                <main className="flex-1">{children}</main>
-              </div>
-            </div>
+            <DashboardShell>{children}</DashboardShell>
           </DialogProvider>
         </PageTitleProvider>
       </ThemeProvider>

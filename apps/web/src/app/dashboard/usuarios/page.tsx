@@ -49,8 +49,6 @@ export default function DashboardUsuariosPage() {
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
 
-  const tenantSlug = typeof window !== 'undefined' ? localStorage.getItem('tenantId') : null;
-
   useEffect(() => {
     setPageTitle('Usuários', 'Gerencie os usuários da sua tenant');
     const token = localStorage.getItem('accessToken');
@@ -103,7 +101,6 @@ export default function DashboardUsuariosPage() {
             email: form.email,
             password: form.password,
             role: form.role,
-            tenantId: tenantSlug,
           }),
         });
         setUsers((prev) => [user, ...prev]);

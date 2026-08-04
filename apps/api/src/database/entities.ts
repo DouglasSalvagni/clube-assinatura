@@ -14,6 +14,15 @@ export enum BillingEnvironment { SANDBOX = 'SANDBOX', PRODUCTION = 'PRODUCTION' 
 export enum BillingProviderName { ASAAS = 'ASAAS' }
 export enum BillingCycle { WEEKLY = 'WEEKLY', BIWEEKLY = 'BIWEEKLY', MONTHLY = 'MONTHLY', BIMONTHLY = 'BIMONTHLY', QUARTERLY = 'QUARTERLY', SEMIANNUALLY = 'SEMIANNUALLY', YEARLY = 'YEARLY' }
 export enum BillingType { BOLETO = 'BOLETO', CREDIT_CARD = 'CREDIT_CARD', PIX = 'PIX', UNDEFINED = 'UNDEFINED' }
+export enum CustomerType { PERSON = 'PERSON', COMPANY = 'COMPANY' }
+export enum CommercialStatus { DRAFT = 'DRAFT', NEGOTIATION = 'NEGOTIATION', PENDING_APPROVAL = 'PENDING_APPROVAL', APPROVED = 'APPROVED', CHECKOUT_SENT = 'CHECKOUT_SENT', CONVERTED = 'CONVERTED', LOST = 'LOST' }
+export enum ApprovalStatus { PENDING = 'PENDING', APPROVED = 'APPROVED', REJECTED = 'REJECTED', CANCELLED = 'CANCELLED' }
+export enum ContractStatus { DRAFT = 'DRAFT', READY = 'READY', ACCEPTED = 'ACCEPTED', VOID = 'VOID' }
+export enum ContractRelationType { ORIGINAL = 'ORIGINAL', AMENDMENT = 'AMENDMENT', RENEWAL = 'RENEWAL', REPLACEMENT = 'REPLACEMENT' }
+export enum PrecheckoutStatus { CREATED = 'CREATED', DATA_COMPLETED = 'DATA_COMPLETED', CONTRACT_READY = 'CONTRACT_READY', ACCEPTED = 'ACCEPTED', PAYMENT_PENDING = 'PAYMENT_PENDING', COMPLETED = 'COMPLETED', EXPIRED = 'EXPIRED', CANCELLED = 'CANCELLED', FAILED = 'FAILED', REVOKED = 'REVOKED' }
+export enum CommercialOfferStatus { DRAFT = 'DRAFT', PUBLISHED = 'PUBLISHED', ARCHIVED = 'ARCHIVED' }
+export enum CommercialOfferVersionStatus { DRAFT = 'DRAFT', PUBLISHED = 'PUBLISHED', RETIRED = 'RETIRED' }
+export enum ContractTemplateStatus { DRAFT = 'DRAFT', PUBLISHED = 'PUBLISHED', RETIRED = 'RETIRED' }
 export enum OpportunityStatus { OPEN = 'OPEN', CHECKOUT_PENDING = 'CHECKOUT_PENDING', PAID = 'PAID', WON = 'WON', LOST = 'LOST', CANCELLED = 'CANCELLED', EXPIRED = 'EXPIRED' }
 export enum MemberRole { PRIMARY = 'PRIMARY', DEPENDENT = 'DEPENDENT' }
 export enum SubscriptionStatus { DRAFT = 'DRAFT', PENDING_PAYMENT = 'PENDING_PAYMENT', ACTIVE = 'ACTIVE', PAST_DUE = 'PAST_DUE', SUSPENDED = 'SUSPENDED', CANCELLATION_SCHEDULED = 'CANCELLATION_SCHEDULED', CANCELLED = 'CANCELLED', EXPIRED = 'EXPIRED' }
@@ -166,6 +175,12 @@ export class Opportunity extends UnitScopedEntity {
   @Index()
   @Column({ name: 'primary_person_id', type: 'uuid' }) primaryPersonId: string;
   @Column({ name: 'owner_user_id', type: 'uuid', nullable: true }) ownerUserId: string | null;
+  @Column({ name: 'team_id', type: 'uuid', nullable: true }) teamId: string | null;
+  @Column({ name: 'pipeline_stage_id', type: 'uuid', nullable: true }) pipelineStageId: string | null;
+  @Column({ name: 'offer_version_id', type: 'uuid', nullable: true }) offerVersionId: string | null;
+  @Column({ name: 'customer_type', type: 'varchar', length: 20, default: CustomerType.PERSON }) customerType: CustomerType;
+  @Column({ name: 'commercial_status', type: 'varchar', length: 30, default: CommercialStatus.DRAFT }) commercialStatus: CommercialStatus;
+  @Column({ name: 'negotiation_snapshot', type: 'jsonb', default: () => "'{}'::jsonb" }) negotiationSnapshot: Record<string, any>;
   @Column({ name: 'plan_price_id', type: 'uuid', nullable: true }) planPriceId: string | null;
   @Column({ type: 'varchar', length: 30, default: OpportunityStatus.OPEN }) status: OpportunityStatus;
   @Column({ name: 'expected_value', type: 'numeric', precision: 14, scale: 2, nullable: true }) expectedValue: string | null;
@@ -336,8 +351,176 @@ export class AuditLog extends UnitScopedEntity {
   @Column({ type: 'jsonb', default: () => "'{}'::jsonb" }) metadata: Record<string, any>;
 }
 
+
+
+@Entity('commercial_offers')
+@Index(['unitId', 'code'], { unique: true })
+@Index(['publicSlug'], { unique: true, where: 'public_slug IS NOT NULL' })
+export class CommercialOffer extends UnitScopedEntity {
+  @Column({ type: 'varchar', length: 120 }) code: string;
+  @Column({ type: 'varchar', length: 180 }) name: string;
+  @Column({ type: 'text', nullable: true }) description: string | null;
+  @Column({ name: 'customer_type', type: 'varchar', length: 20 }) customerType: CustomerType;
+  @Column({ type: 'varchar', length: 30, default: CommercialOfferStatus.DRAFT }) status: CommercialOfferStatus;
+  @Column({ name: 'public_slug', type: 'varchar', length: 160, nullable: true }) publicSlug: string | null;
+  @Column({ name: 'assignment_team_id', type: 'uuid', nullable: true }) assignmentTeamId: string | null;
+  @Column({ name: 'assignment_user_id', type: 'uuid', nullable: true }) assignmentUserId: string | null;
+  @Column({ type: 'boolean', default: true }) active: boolean;
+  @Column({ type: 'jsonb', default: () => "'{}'::jsonb" }) metadata: Record<string, any>;
+}
+
+@Entity('contract_templates')
+@Index(['unitId', 'code'], { unique: true })
+export class ContractTemplate extends UnitScopedEntity {
+  @Column({ type: 'varchar', length: 120 }) code: string;
+  @Column({ type: 'varchar', length: 180 }) name: string;
+  @Column({ name: 'customer_type', type: 'varchar', length: 20 }) customerType: CustomerType;
+  @Column({ type: 'boolean', default: true }) active: boolean;
+  @Column({ type: 'jsonb', default: () => "'{}'::jsonb" }) metadata: Record<string, any>;
+}
+
+@Entity('contract_template_versions')
+@Index(['unitId', 'templateId', 'version'], { unique: true })
+export class ContractTemplateVersion extends UnitScopedEntity {
+  @Column({ name: 'template_id', type: 'uuid' }) templateId: string;
+  @Column({ type: 'int' }) version: number;
+  @Column({ type: 'varchar', length: 30, default: ContractTemplateStatus.DRAFT }) status: ContractTemplateStatus;
+  @Column({ type: 'text' }) content: string;
+  @Column({ type: 'jsonb', default: () => "'[]'::jsonb" }) variables: string[];
+  @Column({ name: 'published_at', type: 'timestamptz', nullable: true }) publishedAt: Date | null;
+}
+
+@Entity('commercial_offer_versions')
+@Index(['unitId', 'offerId', 'version'], { unique: true })
+export class CommercialOfferVersion extends UnitScopedEntity {
+  @Column({ name: 'offer_id', type: 'uuid' }) offerId: string;
+  @Column({ type: 'int' }) version: number;
+  @Column({ type: 'varchar', length: 30, default: CommercialOfferVersionStatus.DRAFT }) status: CommercialOfferVersionStatus;
+  @Column({ name: 'billing_cycle', type: 'varchar', length: 30 }) billingCycle: BillingCycle;
+  @Column({ name: 'holder_amount', type: 'numeric', precision: 14, scale: 2, nullable: true }) holderAmount: string | null;
+  @Column({ name: 'dependent_amount', type: 'numeric', precision: 14, scale: 2, nullable: true }) dependentAmount: string | null;
+  @Column({ name: 'unit_price', type: 'numeric', precision: 14, scale: 2, nullable: true }) unitPrice: string | null;
+  @Column({ name: 'included_lives', type: 'int', default: 1 }) includedLives: number;
+  @Column({ name: 'max_dependents', type: 'int', default: 0 }) maxDependents: number;
+  @Column({ name: 'min_lives', type: 'int', default: 1 }) minLives: number;
+  @Column({ name: 'max_lives', type: 'int', nullable: true }) maxLives: number | null;
+  @Column({ name: 'allowed_billing_types', type: 'jsonb', default: () => "'[]'::jsonb" }) allowedBillingTypes: BillingType[];
+  @Column({ name: 'pricing_rules', type: 'jsonb', default: () => "'{}'::jsonb" }) pricingRules: Record<string, any>;
+  @Column({ name: 'contract_template_version_id', type: 'uuid', nullable: true }) contractTemplateVersionId: string | null;
+  @Column({ name: 'effective_from', type: 'date', nullable: true }) effectiveFrom: string | null;
+  @Column({ name: 'effective_to', type: 'date', nullable: true }) effectiveTo: string | null;
+  @Column({ name: 'published_at', type: 'timestamptz', nullable: true }) publishedAt: Date | null;
+  @Column({ type: 'jsonb', default: () => "'{}'::jsonb" }) metadata: Record<string, any>;
+}
+
+@Entity('commercial_pipelines')
+@Index(['unitId', 'name'], { unique: true })
+export class CommercialPipeline extends UnitScopedEntity {
+  @Column({ type: 'varchar', length: 160 }) name: string;
+  @Column({ name: 'is_default', type: 'boolean', default: false }) isDefault: boolean;
+  @Column({ type: 'boolean', default: true }) active: boolean;
+}
+
+@Entity('commercial_pipeline_stages')
+@Index(['unitId', 'pipelineId', 'code'], { unique: true })
+export class CommercialPipelineStage extends UnitScopedEntity {
+  @Column({ name: 'pipeline_id', type: 'uuid' }) pipelineId: string;
+  @Column({ type: 'varchar', length: 100 }) code: string;
+  @Column({ type: 'varchar', length: 160 }) name: string;
+  @Column({ type: 'int', default: 0 }) position: number;
+  @Column({ name: 'commercial_status', type: 'varchar', length: 30, nullable: true }) commercialStatus: CommercialStatus | null;
+  @Column({ type: 'boolean', default: true }) active: boolean;
+}
+
+@Entity('negotiation_policies')
+@Index(['unitId', 'name'])
+export class NegotiationPolicy extends UnitScopedEntity {
+  @Column({ type: 'varchar', length: 160 }) name: string;
+  @Column({ name: 'target_role', type: 'varchar', length: 40, nullable: true }) targetRole: UnitRole | null;
+  @Column({ name: 'target_user_id', type: 'uuid', nullable: true }) targetUserId: string | null;
+  @Column({ name: 'max_discount_percent', type: 'numeric', precision: 6, scale: 2, default: 0 }) maxDiscountPercent: string;
+  @Column({ name: 'max_discount_amount', type: 'numeric', precision: 14, scale: 2, nullable: true }) maxDiscountAmount: string | null;
+  @Column({ name: 'min_unit_price', type: 'numeric', precision: 14, scale: 2, nullable: true }) minUnitPrice: string | null;
+  @Column({ name: 'allowed_billing_types', type: 'jsonb', default: () => "'[]'::jsonb" }) allowedBillingTypes: BillingType[];
+  @Column({ type: 'boolean', default: true }) active: boolean;
+  @Column({ type: 'jsonb', default: () => "'{}'::jsonb" }) rules: Record<string, any>;
+}
+
+@Entity('approval_requests')
+@Index(['unitId', 'opportunityId', 'status'])
+export class ApprovalRequest extends UnitScopedEntity {
+  @Column({ name: 'opportunity_id', type: 'uuid' }) opportunityId: string;
+  @Column({ name: 'requested_by', type: 'uuid' }) requestedBy: string;
+  @Column({ name: 'decided_by', type: 'uuid', nullable: true }) decidedBy: string | null;
+  @Column({ type: 'varchar', length: 30, default: ApprovalStatus.PENDING }) status: ApprovalStatus;
+  @Column({ type: 'text' }) reason: string;
+  @Column({ name: 'requested_conditions', type: 'jsonb', default: () => "'{}'::jsonb" }) requestedConditions: Record<string, any>;
+  @Column({ name: 'policy_evaluation', type: 'jsonb', default: () => "'{}'::jsonb" }) policyEvaluation: Record<string, any>;
+  @Column({ name: 'decision_notes', type: 'text', nullable: true }) decisionNotes: string | null;
+  @Column({ name: 'decided_at', type: 'timestamptz', nullable: true }) decidedAt: Date | null;
+}
+
+@Entity('contracts')
+@Index(['unitId', 'opportunityId'])
+export class Contract extends UnitScopedEntity {
+  @Column({ name: 'opportunity_id', type: 'uuid' }) opportunityId: string;
+  @Column({ name: 'parent_contract_id', type: 'uuid', nullable: true }) parentContractId: string | null;
+  @Column({ name: 'relation_type', type: 'varchar', length: 30, default: ContractRelationType.ORIGINAL }) relationType: ContractRelationType;
+  @Column({ name: 'change_reason', type: 'text', nullable: true }) changeReason: string | null;
+  @Column({ name: 'requires_payment', type: 'boolean', default: true }) requiresPayment: boolean;
+  @Column({ type: 'int', default: 1 }) version: number;
+  @Column({ type: 'varchar', length: 30, default: ContractStatus.DRAFT }) status: ContractStatus;
+  @Column({ name: 'template_code', type: 'varchar', length: 120, default: 'DEFAULT' }) templateCode: string;
+  @Column({ name: 'template_version_id', type: 'uuid', nullable: true }) templateVersionId: string | null;
+  @Column({ type: 'jsonb' }) snapshot: Record<string, any>;
+  @Column({ name: 'rendered_content', type: 'text' }) renderedContent: string;
+  @Column({ name: 'content_hash', type: 'varchar', length: 64 }) contentHash: string;
+  @Column({ name: 'accepted_at', type: 'timestamptz', nullable: true }) acceptedAt: Date | null;
+}
+
+@Entity('contract_acceptances')
+@Index(['unitId', 'contractId'], { unique: true })
+export class ContractAcceptance extends UnitScopedEntity {
+  @Column({ name: 'contract_id', type: 'uuid' }) contractId: string;
+  @Column({ name: 'accepted_by_name', type: 'varchar', length: 200 }) acceptedByName: string;
+  @Column({ name: 'accepted_by_tax_id', type: 'varchar', length: 20 }) acceptedByTaxId: string;
+  @Column({ name: 'ip_address', type: 'varchar', length: 80, nullable: true }) ipAddress: string | null;
+  @Column({ name: 'user_agent', type: 'varchar', length: 500, nullable: true }) userAgent: string | null;
+  @Column({ name: 'content_hash', type: 'varchar', length: 64 }) contentHash: string;
+  @Column({ name: 'accepted_at', type: 'timestamptz' }) acceptedAt: Date;
+  @Column({ type: 'jsonb', default: () => "'{}'::jsonb" }) evidence: Record<string, any>;
+}
+
+@Entity('precheckout_sessions')
+@Index(['tokenHash'], { unique: true })
+@Index(['unitId', 'opportunityId'])
+export class PrecheckoutSession extends UnitScopedEntity {
+  @Column({ name: 'opportunity_id', type: 'uuid' }) opportunityId: string;
+  @Column({ name: 'contract_id', type: 'uuid', nullable: true }) contractId: string | null;
+  @Column({ name: 'checkout_session_id', type: 'uuid', nullable: true }) checkoutSessionId: string | null;
+  @Column({ name: 'token_hash', type: 'varchar', length: 64 }) tokenHash: string;
+  @Column({ type: 'varchar', length: 40, default: PrecheckoutStatus.CREATED }) status: PrecheckoutStatus;
+  @Column({ name: 'expires_at', type: 'timestamptz' }) expiresAt: Date;
+  @Column({ name: 'revoked_at', type: 'timestamptz', nullable: true }) revokedAt: Date | null;
+  @Column({ name: 'customer_data', type: 'jsonb', default: () => "'{}'::jsonb" }) customerData: Record<string, any>;
+  @Column({ name: 'pricing_snapshot', type: 'jsonb', default: () => "'{}'::jsonb" }) pricingSnapshot: Record<string, any>;
+}
+
+@Entity('precheckout_participants')
+@Index(['unitId', 'precheckoutSessionId', 'taxId'], { unique: true })
+export class PrecheckoutParticipant extends UnitScopedEntity {
+  @Column({ name: 'precheckout_session_id', type: 'uuid' }) precheckoutSessionId: string;
+  @Column({ type: 'varchar', length: 30, default: MemberRole.DEPENDENT }) role: MemberRole;
+  @Column({ type: 'varchar', length: 200 }) name: string;
+  @Column({ name: 'tax_id', type: 'varchar', length: 20 }) taxId: string;
+  @Column({ name: 'birth_date', type: 'date', nullable: true }) birthDate: string | null;
+  @Column({ type: 'varchar', length: 80, nullable: true }) relationship: string | null;
+}
+
 export const ALL_ENTITIES = [
   User, Unit, Membership, RefreshToken, BillingConnection, Person, Plan, PlanPrice,
   Team, TeamMember, Opportunity, OpportunityMember, BillingCustomer, CheckoutSession,
   Subscription, SubscriptionMember, Invoice, Payment, Sale, WebhookEvent, LifecycleEvent, AuditLog,
+  CommercialOffer, CommercialOfferVersion, CommercialPipeline, CommercialPipelineStage, ContractTemplate, ContractTemplateVersion,
+  NegotiationPolicy, ApprovalRequest, Contract, ContractAcceptance, PrecheckoutSession, PrecheckoutParticipant,
 ];

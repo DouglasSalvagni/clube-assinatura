@@ -396,7 +396,11 @@ export default function OportunidadeDetailPage() {
                 <button                   onClick={async () => {
                   try {
                     const token = localStorage.getItem('accessToken');
-                    const tid = localStorage.getItem('tenantId') || 'default';
+                    const tid = localStorage.getItem('tenantId');
+                    if (!tid) {
+                      await alert('Selecione uma matriz antes de gerar o carnê.');
+                      return;
+                    }
                     const res = await fetch(`${API_BASE}/oportunidades/${id}/payment-book`, {
                       headers: { 'x-tenant-id': tid, ...(token ? { Authorization: `Bearer ${token}` } : {}) },
                     });
@@ -502,7 +506,11 @@ export default function OportunidadeDetailPage() {
                 <button onClick={async () => {
                   try {
                     const token = localStorage.getItem('accessToken');
-                    const tid = localStorage.getItem('tenantId') || 'default';
+                    const tid = localStorage.getItem('tenantId');
+                    if (!tid) {
+                      await alert('Selecione uma matriz antes de gerar o carnê.');
+                      return;
+                    }
                     const res = await fetch(`${API_BASE}/oportunidades/${id}/payment-book`, {
                       headers: { 'x-tenant-id': tid, ...(token ? { Authorization: `Bearer ${token}` } : {}) },
                     });

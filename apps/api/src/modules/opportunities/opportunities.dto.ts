@@ -1,6 +1,7 @@
 import { Transform } from 'class-transformer';
-import { IsDateString, IsEnum, IsNumber, IsOptional, IsString, IsUUID, Min, MinLength } from 'class-validator';
-import { BillingCycle, BillingType } from '../../database/entities';
+import { IsArray, IsDateString, IsEnum, IsNumber, IsOptional, IsString, IsUUID, Min, MinLength } from 'class-validator';
+import { BillingCycle, BillingType, CommercialStatus, CustomerType } from '../../database/entities';
+import { EmptyToUndefined } from '../../common/decorators/empty-to-undefined.decorator';
 const digits = ({ value }: { value: any }) => value == null ? value : String(value).replace(/\D/g, '');
 export class CreateOpportunityDto {
   @IsString() nome: string;
@@ -17,10 +18,15 @@ export class CreateOpportunityDto {
   @IsOptional() @IsString() estado?: string;
   @IsOptional() @IsNumber() @Min(0) valor?: number;
   @IsOptional() @IsEnum(BillingType) billingType?: BillingType;
+  @IsOptional() @IsArray() @IsEnum(BillingType, { each: true }) allowedBillingTypes?: BillingType[];
   @IsOptional() @IsEnum(BillingCycle) cycle?: BillingCycle;
-  @IsOptional() @IsUUID() planPriceId?: string;
+  @EmptyToUndefined() @IsOptional() @IsUUID() planPriceId?: string;
   @IsOptional() @IsString() acquisitionSource?: string;
   @IsOptional() @IsString() notes?: string;
+  @IsOptional() @IsEnum(CustomerType) customerType?: CustomerType;
+  @IsOptional() @IsEnum(CommercialStatus) commercialStatus?: CommercialStatus;
+  @EmptyToUndefined() @IsOptional() @IsUUID() teamId?: string;
+  @IsOptional() negotiation?: Record<string, any>;
 }
 export class UpdateOpportunityDto extends CreateOpportunityDto { @IsOptional() declare nome: string; }
 export class CreateOpportunityDependentDto {
@@ -31,3 +37,11 @@ export class CreateOpportunityDependentDto {
 }
 export class UpdateOpportunityDependentDto extends CreateOpportunityDependentDto { @IsOptional() declare nome:string; @IsOptional() declare cpf:string; }
 export class CancelOpportunityDto { @IsString() @MinLength(10) motivo:string; }
+
+export class AssignOpportunityDto {
+  @EmptyToUndefined() @IsOptional() @IsUUID() ownerUserId?: string;
+  @EmptyToUndefined() @IsOptional() @IsUUID() teamId?: string;
+}
+export class MoveOpportunityStageDto {
+  @IsUUID() stageId: string;
+}

@@ -13,7 +13,10 @@
     "migration:run": "typeorm-ts-node-commonjs migration:run -d src/database/data-source.ts",
     "migration:revert": "typeorm-ts-node-commonjs migration:revert -d src/database/data-source.ts",
     "migration:generate": "typeorm-ts-node-commonjs migration:generate -d src/database/data-source.ts",
-    "seed": "ts-node -r tsconfig-paths/register database/seeds/seed.ts"
+    "seed": "ts-node -r tsconfig-paths/register database/seeds/seed.ts",
+    "seed:test-users": "ts-node -r tsconfig-paths/register database/seeds/seed-test-users.ts",
+    "seed:commercial-feature": "ts-node -r tsconfig-paths/register database/seeds/seed-commercial-feature.ts",
+    "seed:test-all": "npm run seed:test-users && npm run seed:commercial-feature"
   },
   "dependencies": {
     "@nestjs/axios": "^4.0.1",

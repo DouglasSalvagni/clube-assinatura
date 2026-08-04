@@ -7,7 +7,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Not, Repository } from 'typeorm';
 import * as bcrypt from 'bcryptjs';
-import { GlobalRole, Membership, UnitRole, User } from '../../database/entities';
+import { GlobalRole, Membership, Unit, UnitRole, User } from '../../database/entities';
 import { CreateUserDto, UpdateUserDto } from './users.dto';
 
 const roleFromLegacy: Record<string, UnitRole> = {
@@ -37,6 +37,8 @@ export class UsersService {
     private readonly userRepository: Repository<User>,
     @InjectRepository(Membership)
     private readonly membershipRepository: Repository<Membership>,
+    @InjectRepository(Unit)
+    private readonly unitRepository: Repository<Unit>,
   ) {}
 
   async list(unitIds: string[] | null, currentUser: User) {
@@ -82,6 +84,7 @@ export class UsersService {
 
     const targetUnitId = isInstallationAdmin && dto.tenantId ? dto.tenantId : unitId;
     if (!targetUnitId) throw new ForbiddenException('Selecione uma unidade para criar o usuário.');
+    await this.assertActiveUnitExists(targetUnitId);
 
     const normalizedEmail = dto.email.trim().toLowerCase();
     let user = await this.userRepository.findOne({ where: { email: normalizedEmail } });
@@ -127,6 +130,7 @@ export class UsersService {
     }
 
     const targetUnitId = isInstallationAdmin && dto.tenantId ? dto.tenantId : unitId;
+    if (targetUnitId) await this.assertActiveUnitExists(targetUnitId);
     let membership: Membership | null = null;
     if (targetUnitId) {
       membership = await this.membershipRepository.findOne({
@@ -244,6 +248,11 @@ export class UsersService {
       tenantId: membership?.unitId || null,
       asaasWalletId: user.asaasWalletId,
     };
+  }
+
+  private async assertActiveUnitExists(unitId: string): Promise<void> {
+    const exists = await this.unitRepository.exists({ where: { id: unitId, active: true } });
+    if (!exists) throw new NotFoundException('Unidade não encontrada ou inativa.');
   }
 
   private assertInstallationAdmin(user: User) {

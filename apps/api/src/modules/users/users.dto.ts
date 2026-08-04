@@ -1,4 +1,5 @@
 import { IsBoolean, IsEmail, IsIn, IsOptional, IsString, IsUUID, MinLength } from 'class-validator';
+import { EmptyToUndefined } from '../../common/decorators/empty-to-undefined.decorator';
 
 const USER_ROLES = [
   'super-admin',
@@ -25,8 +26,9 @@ export class CreateUserDto {
   @IsIn(USER_ROLES)
   role?: string;
 
+  @EmptyToUndefined()
   @IsOptional()
-  @IsUUID()
+  @IsUUID(undefined, { message: 'tenantId deve ser um UUID válido' })
   tenantId?: string;
 }
 
@@ -48,8 +50,9 @@ export class UpdateUserDto {
   @IsIn(USER_ROLES)
   role?: string;
 
+  @EmptyToUndefined()
   @IsOptional()
-  @IsUUID()
+  @IsUUID(undefined, { message: 'tenantId deve ser um UUID válido' })
   tenantId?: string;
 
   @IsOptional()

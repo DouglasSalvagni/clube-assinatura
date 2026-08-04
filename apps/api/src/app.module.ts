@@ -22,6 +22,7 @@ import { HealthModule } from './modules/health/health.module';
 import { AccessControlModule } from './common/access-control.module';
 import { LifecycleModule } from './modules/lifecycle/lifecycle.module';
 import { redisConnectionOptions } from './common/utils/redis';
+import { CommercialModule } from './modules/commercial/commercial.module';
 
 @Module({
   imports: [
@@ -46,6 +47,7 @@ import { redisConnectionOptions } from './common/utils/redis';
     PlansModule,
     TeamsModule,
     OpportunitiesModule,
+    CommercialModule,
     SubscriptionsModule,
     BillingModule,
     WebhooksModule,

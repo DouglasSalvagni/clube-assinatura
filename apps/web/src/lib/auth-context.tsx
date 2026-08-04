@@ -3,12 +3,20 @@
 import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import { api } from './api';
 
+interface Membership {
+  unitId: string;
+  role: 'OWNER' | 'ADMIN' | 'MANAGER' | 'SALES' | 'FINANCE' | 'SUPPORT' | 'VIEWER';
+  active: boolean;
+}
+
 interface User {
   id: string;
   email: string;
   name: string;
   role: string;
+  globalRole?: string;
   is_platform_admin: boolean;
+  memberships?: Membership[];
 }
 
 interface AuthContextType {

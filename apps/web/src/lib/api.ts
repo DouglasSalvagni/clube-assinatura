@@ -33,6 +33,20 @@ export async function api(path: string, options: ApiOptions = {}) {
     window.location.href = '/login';
   }
 
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) {
+    const raw = await res.text();
+    let message = raw || `Erro HTTP ${res.status}`;
+
+    try {
+      const parsed = JSON.parse(raw) as { message?: string | string[]; error?: string };
+      if (Array.isArray(parsed.message)) message = parsed.message.join('; ');
+      else if (typeof parsed.message === 'string') message = parsed.message;
+      else if (typeof parsed.error === 'string') message = parsed.error;
+    } catch {
+      // Mantém o corpo textual quando a resposta não é JSON.
+    }
+
+    throw new Error(message);
+  }
   return res.json();
 }

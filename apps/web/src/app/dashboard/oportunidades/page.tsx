@@ -160,6 +160,10 @@ export default function OportunidadesPage() {
             <option value="convertida">Convertida</option>
             <option value="cancelada">Cancelada</option>
           </select>
+          <button onClick={() => router.push('/dashboard/oportunidades/kanban')}
+            className="rounded-lg border border-edge bg-surface-elevated px-4 py-2 text-sm font-medium text-ink-secondary hover:text-ink">
+            Kanban
+          </button>
           <button onClick={() => setShowCreate(true)}
             className="rounded-lg bg-brand px-4 py-2 text-sm font-medium text-white shadow-sm transition-colors hover:bg-brand-dark">
             Nova Oportunidade

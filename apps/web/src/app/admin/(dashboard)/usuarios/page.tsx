@@ -19,7 +19,7 @@ interface User {
   id: string;
   name: string;
   email: string;
-  tenant_id: string;
+  tenant_id: string | null;
   role: string;
   is_platform_admin: boolean;
   active: boolean;
@@ -65,7 +65,7 @@ export default function UsuariosPage() {
   const [form, setForm] = useState<FormData>(emptyForm);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<User | null>(null);
 
   useEffect(() => {
     setPageTitle('Usuários', 'Gerencie os usuários da plataforma');
@@ -96,7 +96,7 @@ export default function UsuariosPage() {
       name: u.name,
       email: u.email,
       password: '',
-      tenantId: u.tenant_id,
+      tenantId: u.tenant_id || '',
       role: u.role || 'representante',
       is_platform_admin: u.is_platform_admin,
       active: u.active,
@@ -127,6 +127,7 @@ export default function UsuariosPage() {
             role: form.role,
             tenantId: form.tenantId,
           }),
+          tenantId: form.tenantId,
         });
         setUsers((prev) => [user, ...prev]);
       } else if (mode === 'edit' && editing) {
@@ -144,8 +145,11 @@ export default function UsuariosPage() {
         const updated = await api(`/users/${editing.id}`, {
           method: 'PATCH',
           body: JSON.stringify(body),
+          tenantId: form.tenantId,
         });
-        setUsers((prev) => prev.map((u) => (u.id === editing.id ? updated : u)));
+        setUsers((prev) => prev.map((u) => (
+          u.id === editing.id && u.tenant_id === editing.tenant_id ? updated : u
+        )));
       }
       close();
     } catch (err: any) {
@@ -155,17 +159,23 @@ export default function UsuariosPage() {
     }
   }
 
-  async function handleDelete(id: string) {
+  async function handleDelete(user: User) {
+    if (!user.tenant_id) {
+      setError('Este usuário não possui vínculo com uma matriz.');
+      setConfirmDelete(null);
+      return;
+    }
     try {
-      await api(`/users/${id}`, { method: 'DELETE' });
-      setUsers((prev) => prev.filter((u) => u.id !== id));
+      await api(`/users/${user.id}`, { method: 'DELETE', tenantId: user.tenant_id });
+      setUsers((prev) => prev.filter((u) => !(u.id === user.id && u.tenant_id === user.tenant_id)));
     } catch {
       // ignore
     }
     setConfirmDelete(null);
   }
 
-  function getTenantName(tenantId: string) {
+  function getTenantName(tenantId: string | null) {
+    if (!tenantId) return 'Sem matriz';
     return tenants.find((t) => t.id === tenantId || t.slug === tenantId)?.name || tenantId;
   }
 
@@ -238,7 +248,7 @@ export default function UsuariosPage() {
                           Editar
                         </button>
                         <button
-                          onClick={() => setConfirmDelete(u.id)}
+                          onClick={() => setConfirmDelete(u)}
                           className="rounded-md px-2 py-1 text-xs font-medium text-ink-tertiary transition hover:bg-danger/10 hover:text-danger"
                         >
                           Excluir
@@ -299,7 +309,7 @@ export default function UsuariosPage() {
                 >
                   <option value="">Selecione...</option>
                   {tenants.map((t) => (
-                    <option key={t.id} value={t.slug}>
+                    <option key={t.id} value={t.id}>
                       {t.name}
                     </option>
                   ))}

@@ -5,7 +5,8 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Queue } from 'bullmq';
 import { In, Repository } from 'typeorm';
 import {
-  BillingCustomer, FinancialStatus, Invoice, InvoiceStatus, LifecycleSource, Payment, PaymentStatus,
+  BillingCustomer, CheckoutSession, CheckoutStatus, CommercialStatus, FinancialStatus, Invoice, InvoiceStatus,
+  CustomerType, LifecycleSource, Opportunity, OpportunityStatus, Payment, PaymentStatus, PrecheckoutSession, PrecheckoutStatus,
   Subscription, SubscriptionStatus, Unit, WebhookEvent, WebhookStatus,
 } from '../../database/entities';
 import { BillingService } from '../billing/billing.service';
@@ -22,6 +23,9 @@ export class WebhooksService {
     @InjectRepository(BillingCustomer) private readonly customerRepo: Repository<BillingCustomer>,
     @InjectRepository(Invoice) private readonly invoiceRepo: Repository<Invoice>,
     @InjectRepository(Payment) private readonly paymentRepo: Repository<Payment>,
+    @InjectRepository(CheckoutSession) private readonly checkoutRepo: Repository<CheckoutSession>,
+    @InjectRepository(PrecheckoutSession) private readonly precheckoutRepo: Repository<PrecheckoutSession>,
+    @InjectRepository(Opportunity) private readonly opportunityRepo: Repository<Opportunity>,
     @InjectQueue('billing-webhooks') private readonly queue: Queue,
     private readonly billing: BillingService,
     private readonly opportunities: OpportunitiesService,
@@ -126,14 +130,92 @@ export class WebhooksService {
   }
 
   private async checkout(event: WebhookEvent): Promise<boolean> {
-    const checkout = event.payload?.checkout;
-    if (!checkout?.id) return false;
-    if (event.eventType === 'CHECKOUT_PAID') {
-      await this.opportunities.convertByCheckout(event.unitId, checkout.id, event.payload);
-      return true;
+    const providerCheckout = event.payload?.checkout;
+    const externalId = typeof providerCheckout === 'string'
+      ? providerCheckout
+      : providerCheckout?.id ? String(providerCheckout.id) : null;
+    if (!externalId) return false;
+
+    const checkout = await this.checkoutRepo.findOne({
+      where: { unitId: event.unitId, externalId },
+    });
+    if (!checkout) {
+      throw new NotFoundException('Sessão de checkout não encontrada para o evento recebido.');
     }
-    await this.lifecycle.record({ unitId: event.unitId, type: event.eventType.toLowerCase(), source: LifecycleSource.WEBHOOK, correlationId: event.id, metadata: { checkoutId: checkout.id } });
+
+    const mappedStatus = this.checkoutStatus(event.eventType);
+    checkout.status = mappedStatus;
+    checkout.payload = {
+      ...(checkout.payload || {}),
+      lastWebhookEventId: event.id,
+      lastWebhookEventType: event.eventType,
+      providerStatus: typeof providerCheckout === 'object' ? providerCheckout.status || null : null,
+    };
+    await this.checkoutRepo.save(checkout);
+
+    const precheckout = await this.precheckoutRepo.findOne({
+      where: { unitId: event.unitId, checkoutSessionId: checkout.id },
+    });
+    if (precheckout) {
+      precheckout.status = this.precheckoutStatus(mappedStatus);
+      await this.precheckoutRepo.save(precheckout);
+    }
+
+    if (mappedStatus === CheckoutStatus.PAID) {
+      await this.opportunities.convertByCheckout(event.unitId, externalId, event.payload);
+    } else {
+      const opportunity = await this.opportunityRepo.findOne({
+        where: { unitId: event.unitId, id: checkout.opportunityId },
+      });
+      if (opportunity) {
+        if ([CheckoutStatus.EXPIRED, CheckoutStatus.CANCELLED, CheckoutStatus.FAILED].includes(mappedStatus)) {
+          opportunity.status = OpportunityStatus.OPEN;
+          opportunity.commercialStatus = opportunity.customerType === CustomerType.COMPANY
+            ? CommercialStatus.APPROVED
+            : CommercialStatus.NEGOTIATION;
+        }
+        await this.opportunityRepo.save(opportunity);
+      }
+    }
+
+    await this.lifecycle.record({
+      unitId: event.unitId,
+      type: event.eventType.toLowerCase(),
+      source: LifecycleSource.WEBHOOK,
+      correlationId: event.id,
+      metadata: {
+        checkoutId: externalId,
+        checkoutSessionId: checkout.id,
+        opportunityId: checkout.opportunityId,
+        status: mappedStatus,
+      },
+    });
     return true;
+  }
+
+  private checkoutStatus(eventType: string): CheckoutStatus {
+    const mapping: Record<string, CheckoutStatus> = {
+      CHECKOUT_CREATED: CheckoutStatus.PENDING,
+      CHECKOUT_PENDING: CheckoutStatus.PENDING,
+      CHECKOUT_PAID: CheckoutStatus.PAID,
+      CHECKOUT_EXPIRED: CheckoutStatus.EXPIRED,
+      CHECKOUT_CANCELLED: CheckoutStatus.CANCELLED,
+      CHECKOUT_CANCELED: CheckoutStatus.CANCELLED,
+      CHECKOUT_FAILED: CheckoutStatus.FAILED,
+    };
+    return mapping[eventType] || CheckoutStatus.PENDING;
+  }
+
+  private precheckoutStatus(status: CheckoutStatus): PrecheckoutStatus {
+    const mapping: Record<CheckoutStatus, PrecheckoutStatus> = {
+      [CheckoutStatus.CREATED]: PrecheckoutStatus.ACCEPTED,
+      [CheckoutStatus.PENDING]: PrecheckoutStatus.PAYMENT_PENDING,
+      [CheckoutStatus.PAID]: PrecheckoutStatus.COMPLETED,
+      [CheckoutStatus.EXPIRED]: PrecheckoutStatus.EXPIRED,
+      [CheckoutStatus.CANCELLED]: PrecheckoutStatus.CANCELLED,
+      [CheckoutStatus.FAILED]: PrecheckoutStatus.FAILED,
+    };
+    return mapping[status];
   }
 
   private async payment(event: WebhookEvent): Promise<boolean> {

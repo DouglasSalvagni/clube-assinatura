@@ -11,6 +11,7 @@ import { BillingService } from '../billing/billing.service';
 import { LifecycleService } from '../lifecycle/lifecycle.service';
 import { CancelSubscriptionDto, CreateDependentDto, CreatePaymentDto, UpdateDependentDto, UpdatePrimaryDto } from './subscriptions.dto';
 
+import { isValidCpf, normalizeTaxId } from '../../common/utils/tax-id';
 import { canTransitionSubscription } from './subscription-state-machine';
 @Injectable()
 export class SubscriptionsService {
@@ -128,8 +129,30 @@ export class SubscriptionsService {
 
   async addDependent(unitId: string, reference: string, dto: CreateDependentDto) {
     const sub = await this.resolve(unitId, reference);
-    if (await this.personRepo.exists({ where: { unitId, taxId: dto.cpf } })) throw new ConflictException('CPF já cadastrado na unidade.');
-    const person = await this.personRepo.save(this.personRepo.create({ unitId, kind: 'PERSON' as any, name: dto.nome, taxId: dto.cpf, phone: dto.telefone || null, email: dto.email || null, whatsapp: null, birthDate: dto.dataNascimento || null, address: null, addressNumber: null, complement: null, district: null, city: null, state: null, postalCode: null, metadata: {} }));
+    const taxId = normalizeTaxId(dto.cpf);
+    if (!isValidCpf(taxId)) throw new BadRequestException('CPF inválido.');
+    if (await this.personRepo.exists({ where: { unitId, taxId } })) throw new ConflictException('CPF já cadastrado na unidade.');
+
+    const activeDependents = await this.memberRepo.count({
+      where: {
+        unitId,
+        subscriptionId: sub.id,
+        role: MemberRole.DEPENDENT,
+        status: SubscriptionMemberStatus.ACTIVE,
+      },
+    });
+    const snapshot = sub.metadata?.negotiationSnapshot || {};
+    const customerType = snapshot.customerType;
+    const contractedLives = Number(sub.metadata?.contractedLives || snapshot.participants?.contractedLives || 0);
+    const maxDependents = Number(snapshot.limits?.maxDependents ?? snapshot.participants?.maxDependents ?? 0);
+    if (customerType === 'COMPANY' && contractedLives > 0 && activeDependents >= contractedLives) {
+      throw new ConflictException(`O contrato permite no máximo ${contractedLives} beneficiários ativos.`);
+    }
+    if (customerType === 'PERSON' && maxDependents > 0 && activeDependents >= maxDependents) {
+      throw new ConflictException(`O contrato permite no máximo ${maxDependents} dependentes ativos.`);
+    }
+
+    const person = await this.personRepo.save(this.personRepo.create({ unitId, kind: 'PERSON' as any, name: dto.nome, taxId, phone: dto.telefone || null, email: dto.email || null, whatsapp: null, birthDate: dto.dataNascimento || null, address: null, addressNumber: null, complement: null, district: null, city: null, state: null, postalCode: null, metadata: {} }));
     const member = await this.memberRepo.save(this.memberRepo.create({ unitId, subscriptionId: sub.id, personId: person.id, role: MemberRole.DEPENDENT, status: SubscriptionMemberStatus.ACTIVE, joinedAt: new Date(), leftAt: null, relationship: dto.relationship || null }));
     await this.lifecycle.record({ unitId, subscriptionId: sub.id, personId: person.id, type: 'member.added', source: LifecycleSource.API });
     return { id: member.id, nome: person.name, cpf: person.taxId };
