@@ -7,7 +7,7 @@ import {
   CheckoutStatus, CommercialOfferVersion, CommercialStatus, Contract, ContractAcceptance, ContractRelationType, ContractStatus,
   ContractTemplateStatus, ContractTemplateVersion, CustomerType, GlobalRole, MemberRole, NegotiationPolicy, Opportunity,
   OpportunityMember, OpportunityStatus, Person, PersonKind, PrecheckoutParticipant, PrecheckoutSession,
-  PrecheckoutStatus, Subscription, TeamMember, UnitRole,
+  PrecheckoutStatus, Subscription, Team, TeamMember, UnitRole,
 } from '../../database/entities';
 import { isValidCnpj, isValidCpf, isValidTaxId, normalizeTaxId } from '../../common/utils/tax-id';
 import { PricingService } from './pricing.service';
@@ -32,6 +32,7 @@ export class CommercialWorkflowService {
     @InjectRepository(PrecheckoutParticipant) private readonly participants: Repository<PrecheckoutParticipant>,
     @InjectRepository(OpportunityMember) private readonly opportunityMembers: Repository<OpportunityMember>,
     @InjectRepository(TeamMember) private readonly teamMembers: Repository<TeamMember>,
+    @InjectRepository(Team) private readonly teams: Repository<Team>,
     @InjectRepository(CommercialOfferVersion) private readonly offerVersions: Repository<CommercialOfferVersion>,
     @InjectRepository(ContractTemplateVersion) private readonly templateVersions: Repository<ContractTemplateVersion>,
     @InjectRepository(AuditLog) private readonly auditLogs: Repository<AuditLog>,
@@ -1238,17 +1239,22 @@ As demais cláusulas do contrato de origem permanecem inalteradas.`;
     globalRole: GlobalRole,
   ) {
     if (globalRole === GlobalRole.INSTALLATION_ADMIN || role === UnitRole.OWNER || role === UnitRole.ADMIN) return;
-    if (role === UnitRole.SALES && opportunity.ownerUserId !== userId) {
-      throw new NotFoundException('Oportunidade não encontrada.');
-    }
-    if (role === UnitRole.MANAGER) {
-      const memberships = await this.teamMembers.find({
-        where: { unitId: opportunity.unitId, userId },
-      });
-      if (!opportunity.teamId || !memberships.some((membership) => membership.teamId === opportunity.teamId)) {
-        throw new NotFoundException('Oportunidade não encontrada.');
-      }
-    }
+    if (opportunity.ownerUserId === userId) return;
+    if (!opportunity.teamId || !await this.teams.exists({
+      where: { unitId: opportunity.unitId, id: opportunity.teamId, active: true },
+    })) throw new NotFoundException('Oportunidade não encontrada.');
+
+    if (role === UnitRole.MANAGER && await this.teams.exists({
+      where: { unitId: opportunity.unitId, id: opportunity.teamId, managerId: userId, active: true },
+    })) return;
+
+    if ((role === UnitRole.SALES || role === UnitRole.MANAGER)
+      && opportunity.ownerUserId === null
+      && await this.teamMembers.exists({
+        where: { unitId: opportunity.unitId, teamId: opportunity.teamId, userId },
+      })) return;
+
+    throw new NotFoundException('Oportunidade não encontrada.');
   }
 
   private async audit(

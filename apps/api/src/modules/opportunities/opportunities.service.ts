@@ -6,7 +6,7 @@ import {
   CommercialPipelineStage, CommercialStatus, Contract, ContractStatus, CustomerType, FinancialStatus, GlobalRole, LifecycleSource,
   MemberRole, Membership, Opportunity, OpportunityMember, OpportunityStatus, Person, PlanPrice, PrecheckoutSession,
   PrecheckoutStatus, Sale, Subscription, SubscriptionMember, SubscriptionMemberStatus, SubscriptionStatus,
-  TeamMember, UnitRole, User,
+  Team, TeamMember, UnitRole, User,
 } from '../../database/entities';
 import { AsaasClient } from '../billing/asaas.client';
 import { BillingService } from '../billing/billing.service';
@@ -61,7 +61,16 @@ export class OpportunitiesService {
       ? {...calculated,allowedBillingTypes:dto.allowedBillingTypes?.length?dto.allowedBillingTypes:(dto.billingType?[dto.billingType]:[])}
       : {};
     const finalValue=(snapshot as any)?.pricing?.finalAmount ?? dto.valor;
-    const opp=await this.repo.save(this.repo.create({unitId,primaryPersonId:person.id,ownerUserId:userId,teamId:dto.teamId||null,pipelineStageId:null,offerVersionId:null,customerType:dto.customerType||CustomerType.PERSON,commercialStatus:dto.commercialStatus||CommercialStatus.DRAFT,negotiationSnapshot:snapshot,planPriceId:dto.planPriceId||null,status:OpportunityStatus.OPEN,expectedValue:finalValue!==undefined?Number(finalValue).toFixed(2):null,billingCycle:dto.cycle||null,billingType:dto.billingType||null,acquisitionSource:dto.acquisitionSource||null,notes:dto.notes||null,lossReason:null,asaasCustomerId:null,wonAt:null,cancelledAt:null}));
+    let teamId:string|null=null;
+    let ownerUserId:string|null=userId;
+    if(dto.teamId){
+      const team=await this.dataSource.getRepository(Team).findOne({where:{unitId,id:dto.teamId,active:true}});
+      if(!team)throw new NotFoundException('Time não encontrado ou inativo.');
+      teamId=team.id;
+      const creatorBelongsToTeam=await this.teamMemberRepo.exists({where:{unitId,teamId:team.id,userId}});
+      if(!creatorBelongsToTeam)ownerUserId=null;
+    }
+    const opp=await this.repo.save(this.repo.create({unitId,primaryPersonId:person.id,ownerUserId,teamId,pipelineStageId:null,offerVersionId:null,customerType:dto.customerType||CustomerType.PERSON,commercialStatus:dto.commercialStatus||CommercialStatus.DRAFT,negotiationSnapshot:snapshot,planPriceId:dto.planPriceId||null,status:OpportunityStatus.OPEN,expectedValue:finalValue!==undefined?Number(finalValue).toFixed(2):null,billingCycle:dto.cycle||null,billingType:dto.billingType||null,acquisitionSource:dto.acquisitionSource||null,notes:dto.notes||null,lossReason:null,asaasCustomerId:null,wonAt:null,cancelledAt:null}));
     await this.memberRepo.save(this.memberRepo.create({unitId,opportunityId:opp.id,personId:person.id,role:MemberRole.PRIMARY,relationship:null}));
     await this.lifecycle.record({unitId,personId:person.id,type:'opportunity.created',source:LifecycleSource.API,actorUserId:userId,metadata:{opportunityId:opp.id}});
     return this.serialize(opp,person);
@@ -141,7 +150,9 @@ export class OpportunitiesService {
   async update(unitId:string,id:string,dto:UpdateOpportunityDto,userId?:string,unitRole?:UnitRole|null,globalRole?:GlobalRole){const opp=await this.getEntity(unitId,id,userId,unitRole,globalRole);if(opp.status===OpportunityStatus.WON)throw new BadRequestException('Oportunidade convertida não pode ser editada.');if(dto.cpfCnpj){const customerType=dto.customerType||opp.customerType;const taxId=normalizeTaxId(dto.cpfCnpj);const valid=customerType===CustomerType.COMPANY?isValidCnpj(taxId):isValidCpf(taxId);if(!valid)throw new BadRequestException(customerType===CustomerType.COMPANY?'CNPJ inválido.':'CPF inválido.');dto.cpfCnpj=taxId;}const person=await this.personRepo.findOneByOrFail({id:opp.primaryPersonId,unitId});const p=this.personDto(dto as any);for(const[k,v]of Object.entries(p))if(v!==undefined&&v!==null&&(v!==''||k==='email'))(person as any)[k]=v;if(dto.valor!==undefined)opp.expectedValue=dto.valor.toFixed(2);if(dto.cycle!==undefined)opp.billingCycle=dto.cycle;if(dto.billingType!==undefined)opp.billingType=dto.billingType;if(dto.planPriceId!==undefined)opp.planPriceId=dto.planPriceId;if(dto.acquisitionSource!==undefined)opp.acquisitionSource=dto.acquisitionSource;if(dto.notes!==undefined)opp.notes=dto.notes;
     if(dto.customerType!==undefined)opp.customerType=dto.customerType;
     if(dto.commercialStatus!==undefined)opp.commercialStatus=dto.commercialStatus;
-    if(dto.teamId!==undefined)opp.teamId=dto.teamId;
+    if(dto.teamId!==undefined&&dto.teamId!==opp.teamId){
+      throw new BadRequestException('Use a seção de responsabilidade comercial para alterar o time da oportunidade.');
+    }
     if(dto.negotiation!==undefined){
       if(!dto.cycle&&!opp.billingCycle)throw new BadRequestException('Periodicidade obrigatória para calcular a negociação.');
       const effectiveCustomerType=dto.customerType||opp.customerType;
@@ -174,25 +185,56 @@ export class OpportunitiesService {
     if([OpportunityStatus.WON,OpportunityStatus.CANCELLED].includes(opportunity.status)){
       throw new BadRequestException('Oportunidade encerrada não pode ser transferida.');
     }
-    if(unitRole===UnitRole.MANAGER&&globalRole!==GlobalRole.INSTALLATION_ADMIN){
-      const managed=await this.teamMemberRepo.find({where:{unitId,userId:actorId}});
-      const managedIds=managed.map(item=>item.teamId);
-      if(dto.teamId&&!managedIds.includes(dto.teamId))throw new NotFoundException('Time não encontrado.');
+
+    const requestedTeamId=dto.teamId!==undefined?dto.teamId:opportunity.teamId;
+    const requestedOwnerId=dto.ownerUserId!==undefined?dto.ownerUserId:opportunity.ownerUserId;
+    const teamRepo=this.dataSource.getRepository(Team);
+
+    let requestedTeam:Team|null=null;
+    let actorBelongsToRequestedTeam=false;
+    if(requestedTeamId){
+      requestedTeam=await teamRepo.findOne({where:{unitId,id:requestedTeamId,active:true}});
+      if(!requestedTeam)throw new NotFoundException('Time não encontrado ou inativo.');
+      actorBelongsToRequestedTeam=await this.teamMemberRepo.exists({where:{unitId,teamId:requestedTeamId,userId:actorId}});
     }
-    if(dto.ownerUserId){
-      const membership=await this.membershipRepo.findOne({where:{unitId,userId:dto.ownerUserId,active:true}});
-      if(!membership)throw new NotFoundException('Responsável não pertence à unidade.');
-      if(dto.teamId&&!await this.teamMemberRepo.exists({where:{unitId,teamId:dto.teamId,userId:dto.ownerUserId}})){
-        throw new BadRequestException('O responsável precisa pertencer ao time selecionado.');
+
+    const limitedToSelfClaim=globalRole!==GlobalRole.INSTALLATION_ADMIN&&(
+      unitRole===UnitRole.SALES
+      || (unitRole===UnitRole.MANAGER&&requestedTeam?.managerId!==actorId)
+    );
+    if(limitedToSelfClaim){
+      if(!requestedTeamId||requestedTeamId!==opportunity.teamId||!actorBelongsToRequestedTeam){
+        throw new BadRequestException('Você pode assumir ou devolver somente oportunidades da fila do seu próprio time.');
+      }
+      if(requestedOwnerId!==actorId&&requestedOwnerId!==null){
+        throw new BadRequestException('Você não pode transferir a oportunidade para outro usuário.');
+      }
+      if(requestedOwnerId===null&&opportunity.ownerUserId!==actorId&&opportunity.ownerUserId!==null){
+        throw new BadRequestException('Somente o responsável atual pode devolver a oportunidade para a fila do time.');
       }
     }
+
+    if(requestedOwnerId){
+      const membership=await this.membershipRepo.findOne({where:{unitId,userId:requestedOwnerId,active:true}});
+      if(!membership)throw new NotFoundException('Responsável não pertence à unidade ou está inativo.');
+      if(![UnitRole.OWNER,UnitRole.ADMIN,UnitRole.MANAGER,UnitRole.SALES].includes(membership.role)){
+        throw new BadRequestException('O responsável precisa possuir um perfil comercial.');
+      }
+      if(requestedTeamId&&!await this.teamMemberRepo.exists({where:{unitId,teamId:requestedTeamId,userId:requestedOwnerId}})){
+        throw new BadRequestException('O responsável precisa pertencer ao time selecionado.');
+      }
+      if(unitRole===UnitRole.MANAGER&&globalRole!==GlobalRole.INSTALLATION_ADMIN&&requestedOwnerId!==actorId&&!requestedTeamId){
+        throw new BadRequestException('Para atribuir a outro usuário, selecione um time gerenciado por você.');
+      }
+    }
+
     const before={ownerUserId:opportunity.ownerUserId,teamId:opportunity.teamId};
-    if(dto.ownerUserId!==undefined)opportunity.ownerUserId=dto.ownerUserId||null;
-    if(dto.teamId!==undefined)opportunity.teamId=dto.teamId||null;
+    opportunity.ownerUserId=requestedOwnerId||null;
+    opportunity.teamId=requestedTeamId||null;
     await this.repo.save(opportunity);
     await this.lifecycle.record({
       unitId,personId:opportunity.primaryPersonId,type:'opportunity.assigned',source:LifecycleSource.API,
-      actorUserId:actorId,metadata:{opportunityId:id,before,after:{ownerUserId:opportunity.ownerUserId,teamId:opportunity.teamId}},
+      actorUserId:actorId,metadata:{opportunityId:id,before,after:{ownerUserId:opportunity.ownerUserId,teamId:opportunity.teamId},mode:this.assignmentMode(opportunity)},
     });
     return this.detail(unitId,id,actorId,unitRole,globalRole);
   }
@@ -419,16 +461,12 @@ export class OpportunitiesService {
   private async createPendingSubscription(opp:Opportunity,externalId:string){let sub=await this.subscriptionRepo.findOne({where:{unitId:opp.unitId,sourceOpportunityId:opp.id}});if(sub)return sub;sub=await this.subscriptionRepo.save(this.subscriptionRepo.create({unitId:opp.unitId,primaryPersonId:opp.primaryPersonId,planPriceId:opp.planPriceId,sourceOpportunityId:opp.id,billingConnectionId:(await this.billing.connectionEntity(opp.unitId))?.id||null,externalSubscriptionId:externalId,status:SubscriptionStatus.PENDING_PAYMENT,financialStatus:FinancialStatus.UNKNOWN,accessStatus:AccessStatus.DISABLED,startedAt:null,firstActiveAt:null,currentPeriodStart:null,currentPeriodEnd:null,cancellationScheduledAt:null,cancelledAt:null,lastReactivatedAt:null,cancellationReasonCode:null,cancellationReasonText:null,metadata:{billingCycle:opp.billingCycle,billingType:opp.billingType,negotiationSnapshot:opp.negotiationSnapshot,offerVersionId:opp.offerVersionId}}));const ms=await this.memberRepo.find({where:{unitId:opp.unitId,opportunityId:opp.id}});for(const m of ms)await this.dataSource.getRepository(SubscriptionMember).save(this.dataSource.getRepository(SubscriptionMember).create({unitId:opp.unitId,subscriptionId:sub.id,personId:m.personId,role:m.role,status:SubscriptionMemberStatus.ACTIVE,joinedAt:new Date(),leftAt:null,relationship:m.relationship}));return sub}
   private async ensureCustomer(unitId:string,opp:Opportunity,p:Person){let c=await this.customerRepo.findOne({where:{unitId,personId:p.id,provider:BillingProviderName.ASAAS}});if(c)return c;const x=await this.asaas.createCustomer(unitId,{name:p.name,cpfCnpj:p.taxId,email:p.email,mobilePhone:p.phone,address:p.address,addressNumber:p.addressNumber,complement:p.complement,province:p.district,postalCode:p.postalCode,state:p.state,externalReference:p.id});c=await this.customerRepo.save(this.customerRepo.create({unitId,personId:p.id,provider:BillingProviderName.ASAAS,externalId:x.id,metadata:{}}));opp.asaasCustomerId=x.id;await this.repo.save(opp);return c}
   private async getEntity(unitId:string,id:string,userId?:string,unitRole?:UnitRole|null,globalRole?:GlobalRole){
-    const o=await this.repo.findOne({where:{unitId,id}});
-    if(!o)throw new NotFoundException('Oportunidade não encontrada.');
-    if(userId&&globalRole!==GlobalRole.INSTALLATION_ADMIN){
-      if(unitRole===UnitRole.SALES&&o.ownerUserId!==userId)throw new NotFoundException('Oportunidade não encontrada.');
-      if(unitRole===UnitRole.MANAGER){
-        const teams=await this.teamMemberRepo.find({where:{unitId,userId}});
-        if(!o.teamId||!teams.some(item=>item.teamId===o.teamId))throw new NotFoundException('Oportunidade não encontrada.');
-      }
+    const opportunity=await this.repo.findOne({where:{unitId,id}});
+    if(!opportunity)throw new NotFoundException('Oportunidade não encontrada.');
+    if(userId&&!await this.canAccessOpportunity(opportunity,userId,unitRole||null,globalRole||GlobalRole.STANDARD)){
+      throw new NotFoundException('Oportunidade não encontrada.');
     }
-    return o;
+    return opportunity;
   }
 
   private async applyScope(
@@ -438,19 +476,63 @@ export class OpportunitiesService {
     unitRole:UnitRole|null,
     globalRole:GlobalRole,
   ){
-    if(globalRole===GlobalRole.INSTALLATION_ADMIN)return;
-    if(unitRole===UnitRole.SALES){
-      qb.andWhere('opp.owner_user_id = :scopeUserId',{scopeUserId:userId});
-      return;
+    if(this.hasUnitWideOpportunityAccess(unitRole,globalRole))return;
+    const {memberTeamIds,managedTeamIds}=await this.opportunityAccessTeams(unitIds,userId,unitRole);
+    qb.andWhere(new Brackets((scope:any)=>{
+      scope.where('opp.owner_user_id = :scopeUserId',{scopeUserId:userId});
+      if(memberTeamIds.length){
+        scope.orWhere('(opp.owner_user_id IS NULL AND opp.team_id IN (:...scopeMemberTeamIds))',{scopeMemberTeamIds:memberTeamIds});
+      }
+      if(managedTeamIds.length){
+        scope.orWhere('opp.team_id IN (:...scopeManagedTeamIds)',{scopeManagedTeamIds:managedTeamIds});
+      }
+    }));
+  }
+
+  private hasUnitWideOpportunityAccess(unitRole:UnitRole|null,globalRole:GlobalRole){
+    return globalRole===GlobalRole.INSTALLATION_ADMIN||unitRole===UnitRole.OWNER||unitRole===UnitRole.ADMIN;
+  }
+
+  private async opportunityAccessTeams(unitIds:string[]|null,userId:string,unitRole:UnitRole|null){
+    if(unitRole!==UnitRole.SALES&&unitRole!==UnitRole.MANAGER){
+      return{memberTeamIds:[],managedTeamIds:[]};
     }
-    if(unitRole===UnitRole.MANAGER){
-      const where:any={userId};
-      if(unitIds)where.unitId=In(unitIds);
-      const teams=await this.teamMemberRepo.find({where});
-      const teamIds=[...new Set(teams.map(item=>item.teamId))];
-      if(!teamIds.length)qb.andWhere('1 = 0');
-      else qb.andWhere('opp.team_id IN (:...scopeTeamIds)',{scopeTeamIds:teamIds});
+    const memberWhere:any={userId};
+    const managedWhere:any={managerId:userId,active:true};
+    if(unitIds){
+      memberWhere.unitId=In(unitIds);
+      managedWhere.unitId=In(unitIds);
     }
+    const teamRepo=this.dataSource.getRepository(Team);
+    const [members,managedTeams]=await Promise.all([
+      this.teamMemberRepo.find({where:memberWhere}),
+      unitRole===UnitRole.MANAGER?teamRepo.find({where:managedWhere}):Promise.resolve([]),
+    ]);
+    const rawMemberTeamIds=[...new Set(members.map(item=>item.teamId))];
+    const activeMemberWhere:any={id:In(rawMemberTeamIds),active:true};
+    if(unitIds)activeMemberWhere.unitId=In(unitIds);
+    const activeMemberTeams=rawMemberTeamIds.length
+      ? await teamRepo.find({where:activeMemberWhere})
+      : [];
+    return{
+      memberTeamIds:activeMemberTeams.map(team=>team.id),
+      managedTeamIds:[...new Set(managedTeams.map(item=>item.id))],
+    };
+  }
+
+  private async canAccessOpportunity(opportunity:Opportunity,userId:string,unitRole:UnitRole|null,globalRole:GlobalRole){
+    if(this.hasUnitWideOpportunityAccess(unitRole,globalRole))return true;
+    if(opportunity.ownerUserId===userId)return true;
+    if(!opportunity.teamId)return false;
+    const {memberTeamIds,managedTeamIds}=await this.opportunityAccessTeams([opportunity.unitId],userId,unitRole);
+    if(managedTeamIds.includes(opportunity.teamId))return true;
+    return opportunity.ownerUserId===null&&memberTeamIds.includes(opportunity.teamId);
+  }
+
+  private assignmentMode(opportunity:Opportunity){
+    if(opportunity.ownerUserId)return'INDIVIDUAL';
+    if(opportunity.teamId)return'TEAM_QUEUE';
+    return'UNASSIGNED';
   }
   private validatePersonPaymentRules(customerType:CustomerType,cycle:BillingCycle|null|undefined,allowedBillingTypes:BillingType[],billingType:BillingType|null|undefined){
     if(customerType!==CustomerType.PERSON||!cycle)return;
@@ -475,7 +557,7 @@ export class OpportunitiesService {
   private personDto(d:any){return{kind:'PERSON' as any,name:d.nome,taxId:d.cpfCnpj||undefined,email:d.email||undefined,phone:d.telefone||undefined,whatsapp:d.telefone||undefined,birthDate:d.dataNascimento||undefined,address:d.endereco||undefined,addressNumber:d.enderecoNumero||undefined,complement:d.complemento||undefined,district:d.bairro||undefined,city:d.cidade||undefined,state:d.estado||undefined,postalCode:d.cep||undefined,metadata:{}}}
   private canonical(value:any):string{if(Array.isArray(value))return`[${value.map(item=>this.canonical(item)).join(',')}]`;if(value&&typeof value==='object')return`{${Object.keys(value).sort().map(key=>`${JSON.stringify(key)}:${this.canonical(value[key])}`).join(',')}}`;return JSON.stringify(value)}
 
-  private serialize(o:Opportunity,p:Person){return{id:o.id,ownerUserId:o.ownerUserId,teamId:o.teamId,pipelineStageId:o.pipelineStageId,offerVersionId:o.offerVersionId,customerType:o.customerType,commercialStatus:o.commercialStatus,negotiationSnapshot:o.negotiationSnapshot,nome:p?.name||'',cpfCnpj:p?.taxId||'',telefone:p?.phone||'',email:p?.email||'',dataNascimento:p?.birthDate||'',endereco:p?.address||'',enderecoNumero:p?.addressNumber||'',complemento:p?.complement||'',bairro:p?.district||'',cidade:p?.city||'',estado:p?.state||'',cep:p?.postalCode||'',valor:Number(o.expectedValue||0),billingType:o.billingType,cycle:o.billingCycle,status:this.toLegacyStatus(o.status),motivoCancelamento:o.lossReason,createdAt:o.createdAt,convertedAt:o.wonAt,asaasCustomerId:o.asaasCustomerId}}
+  private serialize(o:Opportunity,p:Person){return{id:o.id,ownerUserId:o.ownerUserId,teamId:o.teamId,assignmentMode:this.assignmentMode(o),pipelineStageId:o.pipelineStageId,offerVersionId:o.offerVersionId,customerType:o.customerType,commercialStatus:o.commercialStatus,negotiationSnapshot:o.negotiationSnapshot,nome:p?.name||'',cpfCnpj:p?.taxId||'',telefone:p?.phone||'',email:p?.email||'',dataNascimento:p?.birthDate||'',endereco:p?.address||'',enderecoNumero:p?.addressNumber||'',complemento:p?.complement||'',bairro:p?.district||'',cidade:p?.city||'',estado:p?.state||'',cep:p?.postalCode||'',valor:Number(o.expectedValue||0),billingType:o.billingType,cycle:o.billingCycle,status:this.toLegacyStatus(o.status),motivoCancelamento:o.lossReason,createdAt:o.createdAt,convertedAt:o.wonAt,asaasCustomerId:o.asaasCustomerId}}
   private pending(d:any){return REQUIRED.filter(k=>d[k]===null||d[k]===undefined||d[k]==='')}
   private toLegacyStatus(s:OpportunityStatus){return({[OpportunityStatus.OPEN]:'aberta',[OpportunityStatus.CHECKOUT_PENDING]:'checkout_gerado',[OpportunityStatus.PAID]:'checkout_pago',[OpportunityStatus.WON]:'convertida',[OpportunityStatus.LOST]:'cancelada',[OpportunityStatus.CANCELLED]:'cancelada',[OpportunityStatus.EXPIRED]:'checkout_expirado'}as any)[s]}
   private fromLegacyStatus(s:string){return({aberta:OpportunityStatus.OPEN,checkout_gerado:OpportunityStatus.CHECKOUT_PENDING,checkout_pago:OpportunityStatus.PAID,convertida:OpportunityStatus.WON,cancelada:OpportunityStatus.CANCELLED,checkout_expirado:OpportunityStatus.EXPIRED}as any)[s]||s}

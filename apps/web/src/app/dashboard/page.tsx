@@ -39,7 +39,7 @@ export default function DashboardPage() {
   }, [router, setPageTitle]);
 
   if (error) return <div className="p-8"><div className="rounded-xl border border-danger/20 bg-danger/10 p-4 text-sm text-danger">{error}</div></div>;
-  if (!metrics && !error) return <PageSkeleton variant="dashboard" />;
+  if (!metrics) return <PageSkeleton variant="dashboard" />;
 
   return (
     <div className="space-y-6 p-8">

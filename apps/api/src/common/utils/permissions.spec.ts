@@ -10,6 +10,10 @@ describe('permissions', () => {
     expect(hasPermissions(GlobalRole.STANDARD, UnitRole.SALES, [PERMISSIONS.BILLING_MANAGE])).toBe(false);
   });
 
+  it('allows sales users to claim or release opportunities through the guarded assignment endpoint', () => {
+    expect(hasPermissions(GlobalRole.STANDARD, UnitRole.SALES, [PERMISSIONS.OPPORTUNITIES_ASSIGN])).toBe(true);
+  });
+
   it('allows finance users to manage billing', () => {
     expect(hasPermissions(GlobalRole.STANDARD, UnitRole.FINANCE, [PERMISSIONS.BILLING_MANAGE])).toBe(true);
   });

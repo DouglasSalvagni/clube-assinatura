@@ -170,6 +170,7 @@ export class Team extends UnitScopedEntity {
 
 @Entity('team_members')
 @Index(['unitId', 'teamId', 'userId'], { unique: true })
+@Index(['unitId', 'userId'])
 export class TeamMember extends UnitScopedEntity {
   @Column({ name: 'team_id', type: 'uuid' }) teamId: string;
   @Column({ name: 'user_id', type: 'uuid' }) userId: string;
@@ -177,6 +178,8 @@ export class TeamMember extends UnitScopedEntity {
 
 @Entity('opportunities')
 @Index(['unitId', 'status'])
+@Index(['unitId', 'ownerUserId'])
+@Index(['unitId', 'teamId'])
 export class Opportunity extends UnitScopedEntity {
   @Index()
   @Column({ name: 'primary_person_id', type: 'uuid' }) primaryPersonId: string;

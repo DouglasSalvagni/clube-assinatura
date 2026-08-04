@@ -39,8 +39,8 @@ export class UpdateOpportunityDependentDto extends CreateOpportunityDependentDto
 export class CancelOpportunityDto { @IsString() @MinLength(10) motivo:string; }
 
 export class AssignOpportunityDto {
-  @EmptyToUndefined() @IsOptional() @IsUUID() ownerUserId?: string;
-  @EmptyToUndefined() @IsOptional() @IsUUID() teamId?: string;
+  @EmptyToUndefined() @IsOptional() @IsUUID() ownerUserId?: string | null;
+  @EmptyToUndefined() @IsOptional() @IsUUID() teamId?: string | null;
 }
 export class MoveOpportunityStageDto {
   @IsUUID() stageId: string;

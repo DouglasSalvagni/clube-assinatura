@@ -50,7 +50,7 @@ export default function TimesPage() {
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
 
   useEffect(() => {
-    setPageTitle('Times', 'Gerencie os times da sua tenant');
+    setPageTitle('Times', 'Organize equipes, gerentes e filas compartilhadas de oportunidades.');
     const token = localStorage.getItem('accessToken');
     if (!token) { router.push('/login'); return; }
     load();
@@ -173,6 +173,7 @@ export default function TimesPage() {
   }
 
   async function handleRemoveMember(teamId: string, userId: string) {
+    setError('');
     try {
       await api(`/teams/${teamId}/members/${userId}`, { method: 'DELETE' });
       setTeams((prev) =>
@@ -181,17 +182,18 @@ export default function TimesPage() {
           return { ...t, members: t.members.filter((m) => m.userId !== userId) };
         }),
       );
-    } catch {
-      // ignore
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Não foi possível remover o membro.');
     }
   }
 
   async function handleDelete(id: string) {
+    setError('');
     try {
       await api(`/teams/${id}`, { method: 'DELETE' });
       setTeams((prev) => prev.filter((t) => t.id !== id));
-    } catch {
-      // ignore
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Não foi possível excluir o time.');
     }
     setConfirmDelete(null);
   }
@@ -202,8 +204,19 @@ export default function TimesPage() {
     return u ? u.name : userId;
   }
 
+  const commercialUsers = users.filter((user) =>
+    ['administrador', 'gerente', 'representante', 'super-admin'].includes(user.role),
+  );
+
+  const managerCandidates = users.filter((user) =>
+    ['administrador', 'gerente', 'super-admin'].includes(user.role),
+  );
+
   const availableUsers = (teamId: string) =>
-    users.filter((u) => !teams.find((t) => t.id === teamId)?.members.some((m) => m.userId === u.id));
+    commercialUsers.filter((user) => !teams.find((team) => team.id === teamId)?.members.some((member) => member.userId === user.id));
+
+  const teamCountForUser = (userId: string) =>
+    teams.filter((team) => team.members?.some((member) => member.userId === userId)).length;
 
   if (authLoading) return <PageSkeleton variant="cards" />;
 
@@ -212,7 +225,7 @@ export default function TimesPage() {
       <div className="mb-6 flex items-center justify-between">
         <div>
           <h1 className="text-xl font-semibold text-ink">Times</h1>
-          <p className="text-sm text-ink-tertiary">Gerencie os times da sua tenant</p>
+          <p className="text-sm text-ink-tertiary">Organize equipes, gerentes e filas compartilhadas de oportunidades.</p>
         </div>
         <button
           onClick={openCreate}
@@ -221,6 +234,11 @@ export default function TimesPage() {
           Novo Time
         </button>
       </div>
+
+      <div className="mb-5 rounded-xl border border-edge bg-surface-elevated p-4 text-sm text-ink-secondary">
+        <p><strong>Participação em vários times:</strong> é permitida para perfis comerciais. Uma oportunidade com responsável individual aparece somente para ele, para o gerente formal do time e para administradores. Uma oportunidade sem responsável pertence à fila compartilhada e aparece para os membros comerciais daquele time.</p>
+      </div>
+      {error && <div className="mb-5 rounded-lg border border-danger/30 bg-danger/10 p-3 text-sm text-danger">{error}</div>}
 
       {loading ? (
         <CardListSkeleton />
@@ -288,7 +306,10 @@ export default function TimesPage() {
                             </div>
                             <div>
                               <p className="text-sm font-medium text-ink">{member.user?.name || 'Usuário'}</p>
-                              <p className="text-xs text-ink-tertiary">{member.user?.email || ''}</p>
+                              <p className="text-xs text-ink-tertiary">
+                                {member.user?.email || ''}
+                                {teamCountForUser(member.userId) > 1 ? ` · participa de ${teamCountForUser(member.userId)} times` : ''}
+                              </p>
                             </div>
                           </div>
                           <button
@@ -332,12 +353,13 @@ export default function TimesPage() {
                   className="block w-full rounded-lg border border-edge bg-surface-input px-3 py-2 text-sm text-ink focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/20"
                 >
                   <option value="">Sem gerente</option>
-                  {users.map((u) => (
+                  {managerCandidates.map((u) => (
                     <option key={u.id} value={u.id}>
                       {u.name}
                     </option>
                   ))}
                 </select>
+                <p className="mt-1 text-xs text-ink-tertiary">Somente gerentes, administradores ou proprietários podem ser responsáveis formais pelo time.</p>
               </div>
               {error && <p className="text-sm text-danger">{error}</p>}
               <div className="flex justify-end gap-3">
@@ -365,6 +387,7 @@ export default function TimesPage() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 backdrop-blur-[2px]">
           <div className="w-full max-w-md rounded-xl border border-edge bg-surface-elevated p-6 shadow-xl">
             <h2 className="text-lg font-semibold text-ink">Adicionar Membro</h2>
+            <p className="mt-1 text-sm text-ink-tertiary">O mesmo usuário pode participar de mais de um time. O acesso às oportunidades respeita o responsável individual e a fila de cada time.</p>
             <form onSubmit={handleAddMember} className="mt-4 space-y-4">
               <div>
                 <label className="mb-1 block text-sm font-medium text-ink-secondary">Usuário</label>
@@ -381,6 +404,7 @@ export default function TimesPage() {
                     </option>
                   ))}
                 </select>
+                <p className="mt-1 text-xs text-ink-tertiary">Um usuário pode participar de vários times. Apenas perfis comerciais aparecem nesta lista.</p>
               </div>
               {error && <p className="text-sm text-danger">{error}</p>}
               <div className="flex justify-end gap-3">
@@ -409,7 +433,7 @@ export default function TimesPage() {
           <div className="w-full max-w-sm rounded-xl border border-edge bg-surface-elevated p-6 shadow-xl">
             <h2 className="text-lg font-semibold text-ink">Excluir Time</h2>
             <p className="mt-2 text-sm text-ink-secondary">
-              Tem certeza que deseja excluir este time? Esta ação não pode ser desfeita.
+              Tem certeza que deseja excluir este time? Times com oportunidades vinculadas precisam ter essas oportunidades transferidas antes da exclusão.
             </p>
             <div className="mt-6 flex justify-end gap-3">
               <button

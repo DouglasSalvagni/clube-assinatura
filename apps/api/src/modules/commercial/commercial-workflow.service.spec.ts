@@ -35,6 +35,8 @@ function createService(options: {
   people?: any;
   participants?: any;
   opportunityMembers?: any;
+  teamMembers?: any;
+  teams?: any;
   billingCustomers?: any;
   checkoutSessions?: any;
   subscriptions?: any;
@@ -56,6 +58,8 @@ function createService(options: {
   });
   const participants = options.participants || repository();
   const opportunityMembers = options.opportunityMembers || repository({ find: jest.fn().mockResolvedValue([]) });
+  const teamMembers = options.teamMembers || repository({ find: jest.fn().mockResolvedValue([]), exists: jest.fn().mockResolvedValue(false) });
+  const teams = options.teams || repository({ exists: jest.fn().mockResolvedValue(false) });
   const billingCustomers = options.billingCustomers || repository();
   const checkoutSessions = options.checkoutSessions || repository();
   const subscriptions = options.subscriptions || repository();
@@ -69,7 +73,8 @@ function createService(options: {
     sessions,
     participants,
     opportunityMembers,
-    repository(), // team members
+    teamMembers,
+    teams,
     repository(), // offer versions
     repository(), // template versions
     repository(), // audit logs
@@ -81,7 +86,7 @@ function createService(options: {
     options.feature || { assertEnabled: jest.fn() },
   );
   return {
-    service, policies, approvals, opportunities, people, participants, opportunityMembers, sessions, contracts,
+    service, policies, approvals, opportunities, people, participants, opportunityMembers, teamMembers, teams, sessions, contracts,
     billingCustomers, checkoutSessions, subscriptions,
   };
 }
@@ -531,4 +536,67 @@ describe('CommercialWorkflowService', () => {
     expect(result.approval?.id).toBe('approval-1');
   });
 
+});
+
+describe('CommercialWorkflowService — escopo de oportunidade', () => {
+  const opportunity = (overrides: Record<string, unknown> = {}) => ({
+    id: 'opp-1',
+    unitId: 'unit-1',
+    ownerUserId: null,
+    teamId: 'team-1',
+    customerType: CustomerType.PERSON,
+    negotiationSnapshot: {},
+    ...overrides,
+  });
+
+  it('permite ao membro atuar em uma oportunidade da fila compartilhada do time', async () => {
+    const opportunities = repository({ findOne: jest.fn().mockResolvedValue(opportunity()) });
+    const teamMembers = repository({ exists: jest.fn().mockResolvedValue(true) });
+    const teams = repository({ exists: jest.fn().mockResolvedValue(true) });
+    const { service } = createService({ opportunities, teamMembers, teams });
+
+    await expect(service.evaluateOpportunity(
+      'unit-1', 'opp-1', 'seller-1', UnitRole.SALES, GlobalRole.STANDARD,
+    )).resolves.toEqual(expect.objectContaining({ allowed: true }));
+  });
+
+  it('não permite que perfil de suporte atue na fila comercial mesmo sendo membro do time', async () => {
+    const opportunities = repository({ findOne: jest.fn().mockResolvedValue(opportunity()) });
+    const teamMembers = repository({ exists: jest.fn().mockResolvedValue(true) });
+    const { service } = createService({ opportunities, teamMembers });
+
+    await expect(service.evaluateOpportunity(
+      'unit-1', 'opp-1', 'support-1', UnitRole.SUPPORT, GlobalRole.STANDARD,
+    )).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('não permite ao membro atuar na oportunidade individual de um colega', async () => {
+    const opportunities = repository({
+      findOne: jest.fn().mockResolvedValue(opportunity({ ownerUserId: 'seller-a' })),
+    });
+    const teamMembers = repository({ exists: jest.fn().mockResolvedValue(true) });
+    const { service } = createService({ opportunities, teamMembers });
+
+    await expect(service.evaluateOpportunity(
+      'unit-1', 'opp-1', 'seller-b', UnitRole.SALES, GlobalRole.STANDARD,
+    )).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('diferencia time gerenciado de time em que o gerente é apenas membro', async () => {
+    const opportunities = repository({
+      findOne: jest.fn().mockResolvedValue(opportunity({ ownerUserId: 'seller-a' })),
+    });
+    const teams = repository({ exists: jest.fn().mockResolvedValue(false) });
+    const teamMembers = repository({ exists: jest.fn().mockResolvedValue(true) });
+    const { service } = createService({ opportunities, teams, teamMembers });
+
+    await expect(service.evaluateOpportunity(
+      'unit-1', 'opp-1', 'manager-1', UnitRole.MANAGER, GlobalRole.STANDARD,
+    )).rejects.toBeInstanceOf(NotFoundException);
+
+    teams.exists.mockResolvedValue(true);
+    await expect(service.evaluateOpportunity(
+      'unit-1', 'opp-1', 'manager-1', UnitRole.MANAGER, GlobalRole.STANDARD,
+    )).resolves.toEqual(expect.objectContaining({ allowed: true }));
+  });
 });

@@ -23,6 +23,7 @@ import {
   PersonKind,
   Team,
   TeamMember,
+  UnitRole,
 } from '../../database/entities';
 import { isValidCnpj, isValidCpf, normalizeTaxId } from '../../common/utils/tax-id';
 import { PeopleService } from '../people/people.service';
@@ -92,10 +93,16 @@ export class CommercialConfigService {
     if (dto.assignmentTeamId && !await this.teams.exists({ where: { unitId, id: dto.assignmentTeamId } })) {
       throw new BadRequestException('O time de atribuição não pertence à sede.');
     }
-    if (dto.assignmentUserId && !await this.memberships.exists({
-      where: { unitId, userId: dto.assignmentUserId, active: true },
-    })) {
-      throw new BadRequestException('O responsável de atribuição não pertence à sede.');
+    if (dto.assignmentUserId) {
+      const assignmentMembership = await this.memberships.findOne({
+        where: { unitId, userId: dto.assignmentUserId, active: true },
+      });
+      if (!assignmentMembership) {
+        throw new BadRequestException('O responsável de atribuição não pertence à sede.');
+      }
+      if (![UnitRole.OWNER, UnitRole.ADMIN, UnitRole.MANAGER, UnitRole.SALES].includes(assignmentMembership.role)) {
+        throw new BadRequestException('O responsável de atribuição precisa possuir um perfil comercial.');
+      }
     }
     if (dto.assignmentTeamId && dto.assignmentUserId && !await this.teamMembers.exists({
       where: { unitId, teamId: dto.assignmentTeamId, userId: dto.assignmentUserId },
@@ -710,22 +717,39 @@ export class CommercialConfigService {
   }
 
   private async resolveOwner(offer: CommercialOffer) {
-    if (offer.assignmentUserId) return offer.assignmentUserId;
+    if (offer.assignmentUserId) {
+      const membership = await this.memberships.findOne({
+        where: { unitId: offer.unitId, userId: offer.assignmentUserId, active: true },
+      });
+      return membership && [UnitRole.OWNER, UnitRole.ADMIN, UnitRole.MANAGER, UnitRole.SALES].includes(membership.role)
+        ? offer.assignmentUserId
+        : null;
+    }
     if (!offer.assignmentTeamId) return null;
     const members = await this.teamMembers.find({
       where: { unitId: offer.unitId, teamId: offer.assignmentTeamId },
     });
     if (!members.length) return null;
+    const memberships = await this.memberships.find({
+      where: {
+        unitId: offer.unitId,
+        userId: In(members.map((member) => member.userId)),
+        active: true,
+        role: UnitRole.SALES,
+      },
+    });
+    const eligibleUserIds = [...new Set(memberships.map((membership) => membership.userId))];
+    if (!eligibleUserIds.length) return null;
     const counts = await this.opportunities.createQueryBuilder('opportunity')
       .select('opportunity.owner_user_id', 'ownerUserId')
       .addSelect('COUNT(*)', 'total')
       .where('opportunity.unit_id = :unitId', { unitId: offer.unitId })
-      .andWhere('opportunity.owner_user_id IN (:...userIds)', { userIds: members.map((member) => member.userId) })
+      .andWhere('opportunity.owner_user_id IN (:...userIds)', { userIds: eligibleUserIds })
       .andWhere('opportunity.status IN (:...statuses)', { statuses: [OpportunityStatus.OPEN, OpportunityStatus.CHECKOUT_PENDING] })
       .groupBy('opportunity.owner_user_id')
       .getRawMany<{ ownerUserId: string; total: string }>();
     const byUser = new Map<string, number>(counts.map((row) => [row.ownerUserId, Number(row.total)] as [string, number]));
-    return [...members].sort((a, b) => (byUser.get(a.userId) || 0) - (byUser.get(b.userId) || 0))[0].userId;
+    return eligibleUserIds.sort((a, b) => (byUser.get(a) || 0) - (byUser.get(b) || 0))[0];
   }
 
   private async defaultStage(unitId: string) {

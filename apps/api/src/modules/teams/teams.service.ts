@@ -1,7 +1,7 @@
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
-import { GlobalRole, Membership, Team, TeamMember, User } from '../../database/entities';
+import { GlobalRole, Membership, Opportunity, OpportunityStatus, Team, TeamMember, UnitRole, User } from '../../database/entities';
 import { CreateTeamDto, UpdateTeamDto } from './teams.dto';
 
 @Injectable()
@@ -15,6 +15,8 @@ export class TeamsService {
     private readonly userRepository: Repository<User>,
     @InjectRepository(Membership)
     private readonly membershipRepository: Repository<Membership>,
+    @InjectRepository(Opportunity)
+    private readonly opportunityRepository: Repository<Opportunity>,
   ) {}
 
   async list(unitIds: string[] | null) {
@@ -89,6 +91,9 @@ export class TeamsService {
 
   async remove(unitId: string, id: string) {
     await this.team(unitId, id);
+    if (await this.opportunityRepository.exists({ where: { unitId, teamId: id } })) {
+      throw new ConflictException('Este time possui oportunidades vinculadas. Transfira as oportunidades antes de excluí-lo.');
+    }
     await this.teamMemberRepository.delete({ unitId, teamId: id });
     await this.teamRepository.delete({ id, unitId });
   }
@@ -98,9 +103,12 @@ export class TeamsService {
     const user = await this.userRepository.findOne({ where: { id: userId, active: true } });
     if (!user) throw new NotFoundException('Usuário não encontrado ou inativo.');
 
-    const belongsToUnit = user.globalRole === GlobalRole.INSTALLATION_ADMIN
-      || await this.membershipRepository.exists({ where: { unitId, userId, active: true } });
-    if (!belongsToUnit) throw new NotFoundException('Usuário não pertence a esta unidade.');
+    const membership = await this.membershipRepository.findOne({ where: { unitId, userId, active: true } });
+    const isInstallationAdmin = user.globalRole === GlobalRole.INSTALLATION_ADMIN;
+    if (!membership && !isInstallationAdmin) throw new NotFoundException('Usuário não pertence a esta unidade.');
+    if (membership && ![UnitRole.OWNER, UnitRole.ADMIN, UnitRole.MANAGER, UnitRole.SALES].includes(membership.role)) {
+      throw new ConflictException('Somente usuários com perfil comercial podem participar de times de oportunidades.');
+    }
 
     if (await this.teamMemberRepository.exists({ where: { unitId, teamId: id, userId } })) {
       throw new ConflictException('Usuário já pertence ao time.');
@@ -112,6 +120,16 @@ export class TeamsService {
     const team = await this.team(unitId, id);
     if (team.managerId === userId) {
       throw new ConflictException('O gerente do time não pode ser removido dos membros. Altere o gerente primeiro.');
+    }
+    if (await this.opportunityRepository.exists({
+      where: {
+        unitId,
+        teamId: id,
+        ownerUserId: userId,
+        status: In([OpportunityStatus.OPEN, OpportunityStatus.CHECKOUT_PENDING, OpportunityStatus.PAID]),
+      },
+    })) {
+      throw new ConflictException('Este usuário possui oportunidades ativas no time. Transfira-as antes de remover o membro.');
     }
     await this.teamMemberRepository.delete({ unitId, teamId: id, userId });
   }
@@ -126,9 +144,13 @@ export class TeamsService {
     if (!managerId) return null;
     const user = await this.userRepository.findOne({ where: { id: managerId, active: true } });
     if (!user) throw new NotFoundException('Gerente não encontrado ou inativo.');
-    const belongsToUnit = user.globalRole === GlobalRole.INSTALLATION_ADMIN
-      || await this.membershipRepository.exists({ where: { unitId, userId: managerId, active: true } });
-    if (!belongsToUnit) throw new NotFoundException('O gerente selecionado não pertence a esta unidade.');
+    const membership = await this.membershipRepository.findOne({ where: { unitId, userId: managerId, active: true } });
+    if (!membership && user.globalRole !== GlobalRole.INSTALLATION_ADMIN) {
+      throw new NotFoundException('O gerente selecionado não pertence a esta unidade.');
+    }
+    if (membership && ![UnitRole.OWNER, UnitRole.ADMIN, UnitRole.MANAGER].includes(membership.role)) {
+      throw new ConflictException('O gerente do time precisa ter perfil de gerente, administrador ou proprietário.');
+    }
     return managerId;
   }
 

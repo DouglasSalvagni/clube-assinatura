@@ -23,8 +23,13 @@ type Opportunity = {
   checkoutLink?: string | null;
 };
 
-type Team = { id: string; name: string };
-type User = { id: string; name: string };
+type User = { id: string; name: string; role?: string; active?: boolean };
+type Team = {
+  id: string;
+  name: string;
+  managerId?: string | null;
+  members?: Array<{ userId: string; user?: User | null }>;
+};
 type ContractSummary = {
   id: string;
   version: number;
@@ -163,7 +168,42 @@ export default function NegotiationWorkspacePage() {
     ) * (1 - discount);
   }, [form, opportunity]);
 
+  const commercialUsers = useMemo(() => users.filter(candidate =>
+    candidate.active !== false
+    && ['administrador', 'gerente', 'representante', 'super-admin'].includes(String(candidate.role || 'representante')),
+  ), [users]);
+
+  const selectedTeam = useMemo(
+    () => teams.find(team => team.id === assignment.teamId) || null,
+    [assignment.teamId, teams],
+  );
+
+  const assignableUsers = useMemo(() => {
+    if (!selectedTeam) return commercialUsers;
+    const memberIds = new Set((selectedTeam.members || []).map(member => member.userId));
+    return commercialUsers.filter(candidate => memberIds.has(candidate.id));
+  }, [commercialUsers, selectedTeam]);
+
+  const userTeamCount = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const team of teams) {
+      for (const member of team.members || []) counts.set(member.userId, (counts.get(member.userId) || 0) + 1);
+    }
+    return counts;
+  }, [teams]);
+
   const role = user?.role || user?.memberships?.find(membership => membership.active)?.role;
+  const normalizedRole = String(role || '').toUpperCase();
+  const isUnitAdministrator = user?.globalRole === 'INSTALLATION_ADMIN'
+    || ['OWNER', 'ADMIN', 'ADMINISTRADOR', 'SUPER-ADMIN'].includes(normalizedRole);
+  const isManager = ['MANAGER', 'GERENTE'].includes(normalizedRole);
+  const managesSelectedTeam = Boolean(selectedTeam && selectedTeam.managerId === user?.id);
+  const canFullyManageAssignment = isUnitAdministrator || (isManager && (!assignment.teamId || managesSelectedTeam));
+  const visibleTeams = isUnitAdministrator
+    ? teams
+    : isManager
+      ? teams.filter(team => team.managerId === user?.id)
+      : [];
   const canApprove = user?.globalRole === 'INSTALLATION_ADMIN' || ['OWNER', 'ADMIN', 'MANAGER'].includes(String(role));
   const latestAcceptedContract = contracts.find(contract => contract.status === 'ACCEPTED');
 
@@ -309,13 +349,33 @@ export default function NegotiationWorkspacePage() {
       await api(`/oportunidades/${oportunidadeId}/assignment`, {
         method: 'PATCH',
         body: JSON.stringify({
-          teamId: assignment.teamId || undefined,
-          ownerUserId: assignment.ownerUserId || undefined,
+          teamId: assignment.teamId || null,
+          ownerUserId: assignment.ownerUserId || null,
         }),
       });
       await load();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Falha ao transferir oportunidade.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function claimOrReleaseAssignment(ownerUserId: string | null) {
+    if (!opportunity?.teamId) return;
+    setBusy(true);
+    setError('');
+    try {
+      await api(`/oportunidades/${oportunidadeId}/assignment`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          teamId: opportunity.teamId,
+          ownerUserId,
+        }),
+      });
+      await load();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Falha ao atualizar a responsabilidade.');
     } finally {
       setBusy(false);
     }
@@ -401,25 +461,86 @@ export default function NegotiationWorkspacePage() {
 
           <section className="rounded-xl border border-edge bg-surface-elevated p-6">
             <h2 className="text-lg font-semibold">Responsabilidade comercial</h2>
-            <div className="mt-4 grid gap-3 md:grid-cols-2">
-              <label className="text-sm">
-                <span>Time</span>
-                <select value={assignment.teamId} onChange={e => setAssignment({ ...assignment, teamId: e.target.value })} className="mt-1 w-full rounded-lg border px-3 py-2">
-                  <option value="">Sem time</option>
-                  {teams.map(team => <option key={team.id} value={team.id}>{team.name}</option>)}
-                </select>
-              </label>
-              <label className="text-sm">
-                <span>Responsável</span>
-                <select value={assignment.ownerUserId} onChange={e => setAssignment({ ...assignment, ownerUserId: e.target.value })} className="mt-1 w-full rounded-lg border px-3 py-2">
-                  <option value="">Sem responsável</option>
-                  {users.map(user => <option key={user.id} value={user.id}>{user.name}</option>)}
-                </select>
-              </label>
-            </div>
-            <button type="button" onClick={saveAssignment} disabled={busy} className="mt-4 rounded-lg border px-4 py-2 text-sm disabled:opacity-50">
-              Salvar atribuição
-            </button>
+            <p className="mt-1 text-sm text-ink-tertiary">
+              Com responsável definido, a oportunidade é individual. Sem responsável e com time, ela fica na fila compartilhada do time.
+            </p>
+
+            {canFullyManageAssignment ? (
+              <>
+                <div className="mt-4 grid gap-3 md:grid-cols-2">
+                  <label className="text-sm">
+                    <span>Time responsável</span>
+                    <select
+                      value={assignment.teamId}
+                      onChange={event => {
+                        const teamId = event.target.value;
+                        const team = teams.find(item => item.id === teamId);
+                        const memberIds = new Set((team?.members || []).map(member => member.userId));
+                        setAssignment(current => ({
+                          teamId,
+                          ownerUserId: current.ownerUserId && teamId && !memberIds.has(current.ownerUserId)
+                            ? ''
+                            : current.ownerUserId,
+                        }));
+                      }}
+                      className="mt-1 w-full rounded-lg border px-3 py-2"
+                    >
+                      <option value="">Sem time</option>
+                      {visibleTeams.map(team => <option key={team.id} value={team.id}>{team.name}</option>)}
+                    </select>
+                    <small className="mt-1 block text-xs text-ink-tertiary">
+                      O time organiza a gestão e pode receber oportunidades sem responsável individual.
+                    </small>
+                  </label>
+                  <label className="text-sm">
+                    <span>Responsável individual</span>
+                    <select
+                      value={assignment.ownerUserId}
+                      onChange={event => setAssignment({ ...assignment, ownerUserId: event.target.value })}
+                      className="mt-1 w-full rounded-lg border px-3 py-2"
+                    >
+                      <option value="">Sem responsável — fila do time</option>
+                      {assignableUsers.map(candidate => (
+                        <option key={candidate.id} value={candidate.id}>
+                          {candidate.name}{!assignment.teamId && (userTeamCount.get(candidate.id) || 0) > 1 ? ` · ${userTeamCount.get(candidate.id)} times` : ''}
+                        </option>
+                      ))}
+                    </select>
+                    <small className="mt-1 block text-xs text-ink-tertiary">
+                      {assignment.teamId
+                        ? 'A lista mostra somente membros do time selecionado.'
+                        : 'Sem time, a atribuição fica vinculada apenas à pessoa.'}
+                    </small>
+                  </label>
+                </div>
+                <div className="mt-4 rounded-lg border border-edge bg-surface-canvas/40 p-3 text-sm">
+                  <strong>Situação após salvar: </strong>
+                  {assignment.ownerUserId
+                    ? 'responsabilidade individual; colegas do time não terão acesso, exceto o gerente do time.'
+                    : assignment.teamId
+                      ? 'fila compartilhada; todos os membros do time poderão acessar até alguém assumir.'
+                      : 'sem atribuição; somente administradores da sede poderão visualizar.'}
+                </div>
+                <button type="button" onClick={saveAssignment} disabled={busy} className="mt-4 rounded-lg border px-4 py-2 text-sm disabled:opacity-50">
+                  Salvar atribuição
+                </button>
+              </>
+            ) : (
+              <div className="mt-4 rounded-lg border border-edge bg-surface-canvas/40 p-4 text-sm">
+                <p><strong>Time:</strong> {selectedTeam?.name || 'Sem time'}</p>
+                <p className="mt-1"><strong>Responsabilidade:</strong> {opportunity.ownerUserId ? (opportunity.ownerUserId === user?.id ? 'Você é o responsável' : 'Atribuída a outro usuário') : opportunity.teamId ? 'Fila compartilhada do time' : 'Sem atribuição'}</p>
+                {!opportunity.ownerUserId && opportunity.teamId && (
+                  <button type="button" onClick={() => claimOrReleaseAssignment(user?.id || null)} disabled={busy || !user?.id} className="mt-3 rounded-lg bg-brand px-4 py-2 text-white disabled:opacity-50">
+                    Assumir oportunidade
+                  </button>
+                )}
+                {opportunity.ownerUserId === user?.id && opportunity.teamId && (
+                  <button type="button" onClick={() => claimOrReleaseAssignment(null)} disabled={busy} className="mt-3 rounded-lg border px-4 py-2 disabled:opacity-50">
+                    Devolver para a fila do time
+                  </button>
+                )}
+              </div>
+            )}
           </section>
 
           <form onSubmit={save} className="rounded-xl border border-edge bg-surface-elevated p-6">

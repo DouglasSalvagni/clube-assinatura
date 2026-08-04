@@ -25,6 +25,7 @@ interface Opportunity {
   commercialStatus: string;
   ownerUserId: string | null;
   teamId: string | null;
+  assignmentMode?: 'INDIVIDUAL' | 'TEAM_QUEUE' | 'UNASSIGNED';
   valor: number;
   createdAt: string;
 }
@@ -513,6 +514,12 @@ export default function OpportunitiesKanbanPage() {
                     ) : column.items.map((item, itemIndex) => {
                       const ownerName = item.ownerUserId ? userById.get(item.ownerUserId) : null;
                       const teamName = item.teamId ? teamById.get(item.teamId) : null;
+                      const responsibilityLabel = ownerName || (teamName ? `Fila: ${teamName}` : 'Sem atribuição');
+                      const responsibilityDetail = ownerName
+                        ? (teamName || 'Atribuição individual')
+                        : teamName
+                          ? 'Fila compartilhada do time'
+                          : 'Visível somente para administradores';
                       const isDragging = draggedId === item.id;
                       const isSaving = moving === item.id;
 
@@ -562,14 +569,14 @@ export default function OpportunitiesKanbanPage() {
                             <div className="mt-3 flex items-center justify-between gap-2">
                               <div className="flex min-w-0 items-center gap-2">
                                 <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-brand/15 bg-brand/10 text-[10px] font-bold text-brand">
-                                  {initials(ownerName || 'Sem responsável')}
+                                  {initials(responsibilityLabel)}
                                 </span>
                                 <div className="min-w-0">
                                   <p className="truncate text-[11px] font-medium text-ink-secondary">
-                                    {ownerName || 'Sem responsável'}
+                                    {responsibilityLabel}
                                   </p>
                                   <p className="truncate text-[10px] text-ink-tertiary">
-                                    {teamName || labels[item.commercialStatus] || item.commercialStatus}
+                                    {responsibilityDetail}
                                   </p>
                                 </div>
                               </div>

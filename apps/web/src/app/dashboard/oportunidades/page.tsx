@@ -37,6 +37,9 @@ interface Oportunidade {
   cycle: string;
   status: string;
   checkoutId: string | null;
+  ownerUserId: string | null;
+  teamId: string | null;
+  assignmentMode: 'INDIVIDUAL' | 'TEAM_QUEUE' | 'UNASSIGNED';
   createdAt: string;
 }
 
@@ -181,13 +184,14 @@ export default function OportunidadesPage() {
                 <th className="px-5 py-3 font-medium">Valor</th>
                 <th className="px-5 py-3 font-medium">Período</th>
                 <th className="px-5 py-3 font-medium">Status</th>
+                <th className="px-5 py-3 font-medium">Responsabilidade</th>
                 <th className="px-5 py-3 font-medium">Ações</th>
               </tr>
             </thead>
             <tbody>
               {!pageData || pageData.data.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-5 py-12 text-center text-sm text-ink-tertiary">
+                  <td colSpan={8} className="px-5 py-12 text-center text-sm text-ink-tertiary">
                     Nenhuma oportunidade encontrada.
                   </td>
                 </tr>
@@ -206,6 +210,13 @@ export default function OportunidadesPage() {
                       <span className={`inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-medium ${meta.colors}`}>
                         {meta.label}
                       </span>
+                    </td>
+                    <td className="px-5 py-3 text-xs text-ink-secondary">
+                      {t.assignmentMode === 'INDIVIDUAL'
+                        ? 'Responsável individual'
+                        : t.assignmentMode === 'TEAM_QUEUE'
+                          ? 'Fila compartilhada do time'
+                          : 'Sem atribuição'}
                     </td>
                     <td className="px-5 py-3">
                       <div className="flex flex-wrap gap-1">
