@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { usePageTitle } from '@/lib/page-title-context';
 import { formatPhone, formatCpfCnpj } from '@/lib/format';
+import { PageSkeleton } from '@/components/page-skeleton';
 
 const UFS = ['AC','AL','AP','AM','BA','CE','DF','ES','GO','MA','MT','MS','MG','PA','PB','PR','PE','PI','RJ','RN','RS','RO','RR','SC','SP','SE','TO'];
 
@@ -109,7 +110,7 @@ export default function VidasPage() {
     setPage(p);
   }
 
-  if (!loaded) return null;
+  if (!loaded) return <PageSkeleton variant="table" />;
 
   return (
     <div className="p-8">

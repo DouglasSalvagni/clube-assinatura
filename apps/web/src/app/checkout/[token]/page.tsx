@@ -3,6 +3,8 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams } from 'next/navigation';
 import { API_BASE } from '@/lib/api';
+import SafeRichText from '@/components/safe-rich-text';
+import { PublicPageSkeleton } from '@/components/page-skeleton';
 
 type BillingType = 'CREDIT_CARD' | 'BOLETO' | 'PIX';
 type CheckoutData = {
@@ -173,7 +175,7 @@ export default function PublicCheckoutPage() {
     }
   }
 
-  if (!data && !error) return <main className="mx-auto max-w-3xl p-8">Carregando...</main>;
+  if (!data && !error) return <PublicPageSkeleton />;
 
   return (
     <main className="mx-auto max-w-3xl space-y-6 p-6">
@@ -292,7 +294,7 @@ export default function PublicCheckoutPage() {
           <button onClick={generateContract} disabled={busy} className="mt-4 rounded-lg bg-black px-4 py-2 text-white">Gerar contrato</button>
         ) : (
           <>
-            <pre className="mt-4 whitespace-pre-wrap rounded-lg bg-gray-50 p-4 text-sm">{data.contract.content}</pre>
+            <SafeRichText content={data.contract.content} className="mt-4 rounded-lg bg-gray-50 p-5 text-sm text-gray-800" />
             {data.contract.status !== 'ACCEPTED' ? (
               <div className="mt-4">
                 <label className="flex gap-2 text-sm"><input type="checkbox" checked={accepted} onChange={e=>setAccepted(e.target.checked)} /> Li e aceito os termos.</label>

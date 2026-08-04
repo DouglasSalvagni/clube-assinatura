@@ -3,17 +3,22 @@
 import { useEffect, useState, useRef } from 'react';
 import { api } from '@/lib/api';
 import { useAdminTenant } from '@/lib/admin-tenant-context';
+import { Skeleton } from '@/components/page-skeleton';
 
 export default function TenantFilter() {
   const { selectedTenants, setSelectedTenants, allTenants, setAllTenants } = useAdminTenant();
   const [open, setOpen] = useState(false);
+  const [loadingTenants, setLoadingTenants] = useState(true);
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    api('/tenants/available').then((res) => {
-      const list = res.data || [];
-      setAllTenants(list);
-    }).catch(() => {});
+    api('/tenants/available')
+      .then((res) => {
+        const list = res.data || [];
+        setAllTenants(list);
+      })
+      .catch(() => {})
+      .finally(() => setLoadingTenants(false));
   }, [setAllTenants]);
 
   useEffect(() => {
@@ -93,8 +98,14 @@ export default function TenantFilter() {
               <span className="truncate">{t.name}</span>
             </button>
           ))}
-          {allTenants.length === 0 && (
-            <p className="px-2 py-3 text-center text-xs text-ink-tertiary">Carregando unidades...</p>
+          {loadingTenants && (
+            <div role="status" aria-label="Carregando unidades" className="space-y-2 px-2 py-3">
+              <Skeleton className="h-8 w-full rounded-lg" />
+              <Skeleton className="h-8 w-4/5 rounded-lg" />
+            </div>
+          )}
+          {!loadingTenants && allTenants.length === 0 && (
+            <p className="px-2 py-3 text-center text-xs text-ink-tertiary">Nenhuma unidade disponível.</p>
           )}
         </div>
       )}

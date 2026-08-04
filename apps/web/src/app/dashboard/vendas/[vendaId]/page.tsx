@@ -5,6 +5,7 @@ import { useRouter, useParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { usePageTitle } from '@/lib/page-title-context';
 import { formatDate } from '@/lib/format';
+import { DetailSkeleton } from '@/components/page-skeleton';
 
 interface Venda {
   id: string;
@@ -55,20 +56,7 @@ export default function VendaDetailPage() {
   }
 
   if (!venda) {
-    return (
-      <div className="p-8">
-        <button
-          onClick={() => router.push('/dashboard/vendas')}
-          className="mb-4 flex items-center gap-1 text-sm text-ink-tertiary transition-colors hover:text-ink"
-        >
-          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" />
-          </svg>
-          Voltar
-        </button>
-        <p className="text-sm text-ink-tertiary">Carregando...</p>
-      </div>
-    );
+    return <DetailSkeleton />;
   }
 
   return (

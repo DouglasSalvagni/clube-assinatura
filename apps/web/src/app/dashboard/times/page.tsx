@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { useAuth } from '@/lib/auth-context';
 import { usePageTitle } from '@/lib/page-title-context';
+import { CardListSkeleton, PageSkeleton } from '@/components/page-skeleton';
 
 interface User {
   id: string;
@@ -204,7 +205,7 @@ export default function TimesPage() {
   const availableUsers = (teamId: string) =>
     users.filter((u) => !teams.find((t) => t.id === teamId)?.members.some((m) => m.userId === u.id));
 
-  if (authLoading) return null;
+  if (authLoading) return <PageSkeleton variant="cards" />;
 
   return (
     <div className="p-8">
@@ -222,7 +223,7 @@ export default function TimesPage() {
       </div>
 
       {loading ? (
-        <p className="text-sm text-ink-tertiary">Carregando...</p>
+        <CardListSkeleton />
       ) : teams.length === 0 ? (
         <p className="text-sm text-ink-tertiary">Nenhum time encontrado.</p>
       ) : (

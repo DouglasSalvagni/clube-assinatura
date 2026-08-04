@@ -23,7 +23,7 @@ export default function Sidebar({ links, title = 'ClubFlow' }: SidebarProps) {
 
   return (
     <aside
-      className={`flex flex-col border-r border-edge bg-surface transition-all duration-200 ${
+      className={`flex shrink-0 flex-col border-r border-edge bg-surface transition-all duration-200 ${
         collapsed ? 'w-16' : 'w-64'
       } sticky top-0 h-screen`}
     >

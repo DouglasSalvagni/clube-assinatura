@@ -3,6 +3,7 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { API_BASE } from '@/lib/api';
+import { PublicPageSkeleton } from '@/components/page-skeleton';
 
 type Offer = {
   name: string;
@@ -162,7 +163,7 @@ export default function PublicOfferPage() {
   }
 
   if (!offer && !error) {
-    return <main className="mx-auto max-w-4xl p-8">Carregando oferta...</main>;
+    return <PublicPageSkeleton />;
   }
 
   return (

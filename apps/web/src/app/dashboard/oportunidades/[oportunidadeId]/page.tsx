@@ -8,6 +8,7 @@ import { useDialog } from '@/lib/dialog-context';
 import { formatPhone, formatCpfCnpj, formatCep, maskCpfCnpj, maskPhone, maskCep, stripMask } from '@/lib/format';
 import { CurrencyInput } from '@/components/masked-number-input';
 import { OpportunityWorkspaceNav } from '@/components/opportunity-workspace-nav';
+import { DetailSkeleton } from '@/components/page-skeleton';
 
 const cycleOptions = [
   { value: 'WEEKLY', label: 'Semanal' },
@@ -203,7 +204,7 @@ export default function OportunidadeDetailPage() {
     loadOpp();
   }
 
-  if (!loaded) return null;
+  if (!loaded) return <DetailSkeleton />;
 
   const workspaceNav = <OpportunityWorkspaceNav opportunityId={id} />;
 

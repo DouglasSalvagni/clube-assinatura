@@ -6,6 +6,7 @@ import { api } from '@/lib/api';
 import { useAuth } from '@/lib/auth-context';
 import { usePageTitle } from '@/lib/page-title-context';
 import { useAdminTenant } from '@/lib/admin-tenant-context';
+import { CardListSkeleton, PageSkeleton } from '@/components/page-skeleton';
 
 interface User {
   id: string;
@@ -72,7 +73,7 @@ export default function AdminTimesPage() {
     setConfirmDelete(null);
   }
 
-  if (authLoading) return null;
+  if (authLoading) return <PageSkeleton variant="cards" />;
   if (!currentUser?.is_platform_admin) return null;
 
   return (
@@ -83,7 +84,7 @@ export default function AdminTimesPage() {
       </div>
 
       {loading ? (
-        <p className="text-sm text-ink-tertiary">Carregando...</p>
+        <CardListSkeleton />
       ) : teams.length === 0 ? (
         <p className="text-sm text-ink-tertiary">Nenhum time encontrado.</p>
       ) : (

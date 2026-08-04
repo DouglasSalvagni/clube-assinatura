@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { usePageTitle } from '@/lib/page-title-context';
+import { CardListSkeleton, PageSkeleton } from '@/components/page-skeleton';
 
 export default function TenantWebhookPage() {
   const router = useRouter();
@@ -56,7 +57,7 @@ export default function TenantWebhookPage() {
     }
   }
 
-  if (!loaded) return null;
+  if (!loaded) return <PageSkeleton variant="detail" />;
 
   return (
     <div className="p-8">
@@ -75,7 +76,7 @@ export default function TenantWebhookPage() {
       )}
 
       {loading ? (
-        <p className="text-sm text-ink-tertiary">Carregando...</p>
+        <CardListSkeleton items={2} />
       ) : !webhook || webhook.configured === false ? (
         <div className="rounded-xl border border-edge bg-surface-elevated p-6 shadow-sm">
           <p className="mb-4 text-sm text-ink-tertiary">Nenhum webhook configurado para esta tenant.</p>

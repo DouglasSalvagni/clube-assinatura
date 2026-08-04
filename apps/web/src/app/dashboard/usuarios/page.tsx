@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { useAuth } from '@/lib/auth-context';
 import { usePageTitle } from '@/lib/page-title-context';
+import { PageSkeleton, TableSkeleton } from '@/components/page-skeleton';
 
 const ROLES = ['super-admin', 'administrador', 'gerente', 'representante'] as const;
 
@@ -137,7 +138,7 @@ export default function DashboardUsuariosPage() {
     setConfirmDelete(null);
   }
 
-  if (authLoading) return null;
+  if (authLoading) return <PageSkeleton variant="table" />;
 
   return (
     <div className="p-8">
@@ -155,7 +156,7 @@ export default function DashboardUsuariosPage() {
       </div>
 
       {loading ? (
-        <p className="text-sm text-ink-tertiary">Carregando...</p>
+        <TableSkeleton columns={4} />
       ) : users.length === 0 ? (
         <p className="text-sm text-ink-tertiary">Nenhum usuário encontrado.</p>
       ) : (

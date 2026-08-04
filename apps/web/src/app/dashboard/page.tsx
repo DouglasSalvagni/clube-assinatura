@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import MetricCard from '@/components/metric-card';
 import { api } from '@/lib/api';
 import { usePageTitle } from '@/lib/page-title-context';
+import { PageSkeleton } from '@/components/page-skeleton';
 
 interface DashboardMetrics {
   activeSubscriptions: number;
@@ -38,7 +39,7 @@ export default function DashboardPage() {
   }, [router, setPageTitle]);
 
   if (error) return <div className="p-8"><div className="rounded-xl border border-danger/20 bg-danger/10 p-4 text-sm text-danger">{error}</div></div>;
-  if (!metrics) return <div className="p-8 text-sm text-ink-tertiary">Carregando indicadores...</div>;
+  if (!metrics && !error) return <PageSkeleton variant="dashboard" />;
 
   return (
     <div className="space-y-6 p-8">

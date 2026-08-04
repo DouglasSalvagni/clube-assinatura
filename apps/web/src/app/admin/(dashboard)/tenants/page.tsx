@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { useAuth } from '@/lib/auth-context';
 import { usePageTitle } from '@/lib/page-title-context';
+import { PageSkeleton, TableSkeleton } from '@/components/page-skeleton';
 
 interface Tenant {
   id: string;
@@ -101,7 +102,7 @@ export default function TenantsPage() {
     setConfirmDelete(null);
   }
 
-  if (authLoading) return null;
+  if (authLoading) return <PageSkeleton variant="table" />;
 
   return (
     <div className="space-y-6 p-8">
@@ -117,7 +118,7 @@ export default function TenantsPage() {
       )}
 
       {loading ? (
-        <p className="text-sm text-ink-tertiary">Carregando...</p>
+        <TableSkeleton columns={4} />
       ) : tenants.length === 0 ? (
         <p className="text-sm text-ink-tertiary">Nenhum tenant encontrado.</p>
       ) : (

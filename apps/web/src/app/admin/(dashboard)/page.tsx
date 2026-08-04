@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { usePageTitle } from '@/lib/page-title-context';
 import MetricCard from '@/components/metric-card';
+import { PageSkeleton } from '@/components/page-skeleton';
 
 export default function AdminDashboardPage() {
   const router = useRouter();
@@ -27,7 +28,7 @@ export default function AdminDashboardPage() {
     ]).catch(() => {});
   }, [router, setPageTitle]);
 
-  if (!loaded) return null;
+  if (!loaded) return <PageSkeleton variant="dashboard" />;
 
   return (
     <div className="p-8">

@@ -4,6 +4,8 @@ import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '@/lib/api';
 import { usePageTitle } from '@/lib/page-title-context';
 import { toCommercialCode } from '@/lib/commercial-identifiers';
+import RichTextEditor from '@/components/rich-text-editor';
+import { hasRichTextContent, sanitizeRichText } from '@/lib/rich-text';
 
 type TemplateVersion = {
   id: string;
@@ -23,14 +25,12 @@ type Template = {
   versions: TemplateVersion[];
 };
 
-const defaultContent = `CONTRATO DE ADESÃO
-
-Contratante: {{customer.name}}
-CPF/CNPJ: {{customer.taxId}}
-Valor contratado: R$ {{negotiation.pricing.finalAmount}}
-Periodicidade: {{negotiation.cycle}}
-
-Ao aceitar este documento, o contratante confirma os dados e as condições apresentadas.`;
+const defaultContent = `<h2>CONTRATO DE ADESÃO</h2>
+<p><strong>Contratante:</strong> {{customer.name}}<br>
+<strong>CPF/CNPJ:</strong> {{customer.taxId}}<br>
+<strong>Valor contratado:</strong> R$ {{negotiation.pricing.finalAmount}}<br>
+<strong>Periodicidade:</strong> {{negotiation.cycle}}</p>
+<p>Ao aceitar este documento, o contratante confirma os dados e as condições apresentadas.</p>`;
 
 const defaultVariables = [
   'customer.name',
@@ -70,6 +70,14 @@ export default function ContractTemplatesPage() {
   const selectedTemplate = useMemo(
     () => templates.find((template) => template.id === selectedId) || null,
     [templates, selectedId],
+  );
+
+  const editorVariables = useMemo(
+    () => versionForm.variables
+      .split('\n')
+      .map((item) => item.trim())
+      .filter(Boolean),
+    [versionForm.variables],
   );
 
   const load = useCallback(async () => {
@@ -162,12 +170,18 @@ export default function ContractTemplatesPage() {
   async function saveVersion(event: FormEvent) {
     event.preventDefault();
     if (!selectedId) return;
+    if (!hasRichTextContent(versionForm.content)) {
+      setError('Informe o conteúdo do contrato antes de salvar a versão.');
+      return;
+    }
+
+    const sanitizedContent = sanitizeRichText(versionForm.content);
     setBusy(true);
     setError('');
     setSuccess('');
     try {
       const payload = {
-        content: versionForm.content,
+        content: sanitizedContent,
         variables: versionForm.variables
           .split('\n')
           .map((item) => item.trim())
@@ -330,10 +344,26 @@ export default function ContractTemplatesPage() {
           {selectedTemplate && !selectedTemplate.active && (
             <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">Este modelo está revogado. Reative-o para criar ou publicar novas versões.</div>
           )}
-          <label className="block text-sm">
-            <span className="font-medium">Conteúdo do contrato</span>
-            <textarea required rows={14} value={versionForm.content} onChange={(event) => setVersionForm({ ...versionForm, content: event.target.value })} className="mt-1 w-full rounded-lg border px-3 py-2 font-mono text-sm" />
-          </label>
+          <div className="block text-sm">
+            <div className="mb-2 flex flex-wrap items-end justify-between gap-2">
+              <div>
+                <span className="font-medium">Conteúdo do contrato</span>
+                <p className="mt-0.5 text-xs text-ink-tertiary">
+                  Use a barra de ferramentas para estruturar o documento e insira variáveis sem precisar digitá-las.
+                </p>
+              </div>
+              <span className="rounded-full bg-brand/10 px-2.5 py-1 text-[11px] font-medium text-brand">
+                Editor visual
+              </span>
+            </div>
+            <RichTextEditor
+              value={versionForm.content}
+              onChange={(content) => setVersionForm((current) => ({ ...current, content }))}
+              variables={editorVariables}
+              disabled={busy}
+              minHeight={390}
+            />
+          </div>
           <label className="block text-sm">
             <span className="font-medium">Variáveis permitidas, uma por linha</span>
             <textarea required rows={6} value={versionForm.variables} onChange={(event) => setVersionForm({ ...versionForm, variables: event.target.value })} className="mt-1 w-full rounded-lg border px-3 py-2 font-mono text-sm" />

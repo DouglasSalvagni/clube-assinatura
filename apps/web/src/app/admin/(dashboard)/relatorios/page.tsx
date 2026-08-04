@@ -5,6 +5,7 @@ import { api } from '@/lib/api';
 import { useAdminTenant } from '@/lib/admin-tenant-context';
 import TenantFilter from '@/components/tenant-filter';
 import { usePageTitle } from '@/lib/page-title-context';
+import { CardGridSkeleton } from '@/components/page-skeleton';
 
 interface CatalogoRelatorio {
   tipo: string;
@@ -56,7 +57,7 @@ export default function AdminRelatoriosPage() {
       </div>
 
       {loading ? (
-        <div className="flex items-center justify-center py-20 text-sm text-ink-tertiary">Carregando...</div>
+        <CardGridSkeleton />
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {relatorios.map((r) => (

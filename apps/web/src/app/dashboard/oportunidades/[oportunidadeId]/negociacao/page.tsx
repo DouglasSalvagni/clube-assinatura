@@ -8,6 +8,7 @@ import { useAuth } from '@/lib/auth-context';
 import { CurrencyInput, PercentageInput } from '@/components/masked-number-input';
 import { OpportunityWorkspaceNav } from '@/components/opportunity-workspace-nav';
 import { billingTypeLabels, commercialStatusLabels } from '@/lib/commercial-labels';
+import { DetailSkeleton } from '@/components/page-skeleton';
 
 type Opportunity = {
   id: string;
@@ -371,7 +372,7 @@ export default function NegotiationWorkspacePage() {
   }
 
   if (!opportunity && !error) {
-    return <div className="p-8 text-sm text-ink-tertiary">Carregando negociação...</div>;
+    return <DetailSkeleton />;
   }
 
   return (

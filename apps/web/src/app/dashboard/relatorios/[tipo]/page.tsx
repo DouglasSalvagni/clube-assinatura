@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import { api, API_BASE } from '@/lib/api';
 import { usePageTitle } from '@/lib/page-title-context';
+import { Skeleton } from '@/components/page-skeleton';
 
 export default function RelatorioDetailPage() {
   const router = useRouter();
@@ -87,7 +88,9 @@ export default function RelatorioDetailPage() {
           <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" />
         </svg> Voltar
       </button>
-      <h1 className="mb-6 text-xl font-semibold text-ink">{nome || 'Carregando...'}</h1>
+      <h1 className="mb-6 text-xl font-semibold text-ink">
+        {nome || <Skeleton className="h-6 w-56" />}
+      </h1>
 
       <div className="mb-6 rounded-xl border border-edge bg-surface-elevated p-5 shadow-sm">
         <div className="flex flex-wrap items-end gap-3">

@@ -7,6 +7,7 @@ import { api } from '@/lib/api';
 import { usePageTitle } from '@/lib/page-title-context';
 import { useDialog } from '@/lib/dialog-context';
 import { formatDate, formatPhone, formatCpfCnpj, formatCep, maskCpfCnpj, maskPhone, maskCep, stripMask } from '@/lib/format';
+import { PageSkeleton, TableSkeleton } from '@/components/page-skeleton';
 
 const statusMeta: Record<string, { label: string; colors: string }> = {
   ACTIVE: { label: 'Ativo', colors: 'border-success/20 bg-success/10 text-success' },
@@ -246,7 +247,7 @@ export default function VidaDetailPage() {
     }
   }
 
-  if (!loaded) return null;
+  if (!loaded) return <PageSkeleton variant="detail" />;
 
   const totalRecebido = invoices
     .filter((inv) => inv.status === 'RECEIVED' || inv.status === 'CONFIRMED')
@@ -456,7 +457,7 @@ export default function VidaDetailPage() {
           )}
         </div>
         {loadingInvoices ? (
-          <p className="text-sm text-ink-tertiary">Carregando...</p>
+          <TableSkeleton rows={4} columns={4} />
         ) : invoices.length === 0 ? (
           <p className="text-sm text-ink-tertiary">Nenhuma fatura encontrada.</p>
         ) : (

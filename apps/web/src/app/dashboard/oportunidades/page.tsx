@@ -6,6 +6,7 @@ import { api } from '@/lib/api';
 import { usePageTitle } from '@/lib/page-title-context';
 import { useDialog } from '@/lib/dialog-context';
 import { formatPhone, formatCpfCnpj, maskCpfCnpj, maskPhone, stripMask } from '@/lib/format';
+import { PageSkeleton } from '@/components/page-skeleton';
 
 const cycleLabels: Record<string, string> = {
   WEEKLY: 'Semanal',
@@ -111,7 +112,7 @@ export default function OportunidadesPage() {
   const fmtBRL = (v: number) =>
     (v || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 
-  if (!loaded) return null;
+  if (!loaded) return <PageSkeleton variant="table" />;
 
   const indicadores = pageData?.indicadores;
 

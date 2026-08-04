@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { usePageTitle } from '@/lib/page-title-context';
 import { formatDate } from '@/lib/format';
+import { PageSkeleton } from '@/components/page-skeleton';
 
 export default function VendasPage() {
   const router = useRouter();
@@ -30,7 +31,7 @@ export default function VendasPage() {
 
   useEffect(() => { if (loaded) load(page); }, [loaded, page, load]);
 
-  if (!loaded) return null;
+  if (!loaded) return <PageSkeleton variant="table" />;
   const ind = pageData?.indicadores || {};
   return (
     <div className="p-8">

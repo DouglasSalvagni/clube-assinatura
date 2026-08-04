@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { usePageTitle } from '@/lib/page-title-context';
 import { stripMask, maskPhone } from '@/lib/format';
+import { DetailSkeleton } from '@/components/page-skeleton';
 
 export default function ProfilePage() {
   const router = useRouter();
@@ -50,7 +51,7 @@ export default function ProfilePage() {
     }
   }
 
-  if (!loaded) return null;
+  if (!loaded) return <DetailSkeleton />;
 
   return (
     <div className="p-8 max-w-2xl">

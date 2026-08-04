@@ -41,11 +41,11 @@ function DashboardShell({ children }: { children: ReactNode }) {
   }, [user]);
 
   return (
-    <div className="flex min-h-screen bg-surface-canvas text-ink">
+    <div className="flex min-h-screen min-w-0 bg-surface-canvas text-ink">
       <Sidebar links={links} title={productName} />
-      <div className="flex flex-1 flex-col">
+      <div className="flex min-w-0 flex-1 flex-col">
         <Header />
-        <main className="flex-1">{children}</main>
+        <main className="min-w-0 flex-1 overflow-x-hidden">{children}</main>
       </div>
     </div>
   );
