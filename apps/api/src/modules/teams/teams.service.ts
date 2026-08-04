@@ -24,26 +24,32 @@ export class TeamsService {
     const members = teams.length
       ? await this.teamMemberRepository.find({ where: { teamId: In(teams.map((team) => team.id)) } })
       : [];
-    const users = members.length
-      ? await this.userRepository.find({ where: { id: In([...new Set(members.map((member) => member.userId))]) } })
+    const userIds = [...new Set([
+      ...members.map((member) => member.userId),
+      ...teams.map((team) => team.managerId).filter((id): id is string => Boolean(id)),
+    ])];
+    const users = userIds.length
+      ? await this.userRepository.find({ where: { id: In(userIds) } })
       : [];
     const usersById = new Map(users.map((user) => [user.id, user]));
 
     return {
-      data: teams.map((team) => ({
-        ...team,
-        members: members
-          .filter((member) => member.teamId === team.id)
-          .map((member) => ({ ...member, user: usersById.get(member.userId) || null })),
-      })),
+      data: teams.map((team) => this.serialize(team, members, usersById)),
       total: teams.length,
     };
   }
 
   async get(unitId: string, id: string) {
-    const team = await this.teamRepository.findOne({ where: { unitId, id } });
-    if (!team) throw new NotFoundException('Time não encontrado.');
-    return team;
+    const team = await this.team(unitId, id);
+    const members = await this.teamMemberRepository.find({ where: { unitId, teamId: id } });
+    const userIds = [...new Set([
+      ...members.map((member) => member.userId),
+      ...(team.managerId ? [team.managerId] : []),
+    ])];
+    const users = userIds.length
+      ? await this.userRepository.find({ where: { id: In(userIds) } })
+      : [];
+    return this.serialize(team, members, new Map(users.map((user) => [user.id, user])));
   }
 
   async create(unitId: string, dto: CreateTeamDto) {
@@ -51,16 +57,20 @@ export class TeamsService {
     if (await this.teamRepository.exists({ where: { unitId, name } })) {
       throw new ConflictException('Já existe um time com este nome.');
     }
-    return this.teamRepository.save(this.teamRepository.create({
+    const managerId = await this.validateManager(unitId, dto.managerId);
+    const team = await this.teamRepository.save(this.teamRepository.create({
       unitId,
       name,
       description: dto.description?.trim() || null,
+      managerId,
       active: true,
     }));
+    await this.ensureManagerMember(team, managerId);
+    return this.get(unitId, team.id);
   }
 
   async update(unitId: string, id: string, dto: UpdateTeamDto) {
-    const team = await this.get(unitId, id);
+    const team = await this.team(unitId, id);
     if (dto.name) {
       const name = dto.name.trim();
       if (name !== team.name && await this.teamRepository.exists({ where: { unitId, name } })) {
@@ -69,17 +79,22 @@ export class TeamsService {
       team.name = name;
     }
     if (dto.description !== undefined) team.description = dto.description?.trim() || null;
-    return this.teamRepository.save(team);
+    if (dto.managerId !== undefined) {
+      team.managerId = await this.validateManager(unitId, dto.managerId);
+    }
+    const saved = await this.teamRepository.save(team);
+    await this.ensureManagerMember(saved, saved.managerId);
+    return this.get(unitId, id);
   }
 
   async remove(unitId: string, id: string) {
-    await this.get(unitId, id);
+    await this.team(unitId, id);
     await this.teamMemberRepository.delete({ unitId, teamId: id });
     await this.teamRepository.delete({ id, unitId });
   }
 
   async add(unitId: string, id: string, userId: string) {
-    await this.get(unitId, id);
+    await this.team(unitId, id);
     const user = await this.userRepository.findOne({ where: { id: userId, active: true } });
     if (!user) throw new NotFoundException('Usuário não encontrado ou inativo.');
 
@@ -94,7 +109,61 @@ export class TeamsService {
   }
 
   async removeMember(unitId: string, id: string, userId: string) {
-    await this.get(unitId, id);
+    const team = await this.team(unitId, id);
+    if (team.managerId === userId) {
+      throw new ConflictException('O gerente do time não pode ser removido dos membros. Altere o gerente primeiro.');
+    }
     await this.teamMemberRepository.delete({ unitId, teamId: id, userId });
+  }
+
+  private async team(unitId: string, id: string) {
+    const team = await this.teamRepository.findOne({ where: { unitId, id } });
+    if (!team) throw new NotFoundException('Time não encontrado.');
+    return team;
+  }
+
+  private async validateManager(unitId: string, managerId?: string | null) {
+    if (!managerId) return null;
+    const user = await this.userRepository.findOne({ where: { id: managerId, active: true } });
+    if (!user) throw new NotFoundException('Gerente não encontrado ou inativo.');
+    const belongsToUnit = user.globalRole === GlobalRole.INSTALLATION_ADMIN
+      || await this.membershipRepository.exists({ where: { unitId, userId: managerId, active: true } });
+    if (!belongsToUnit) throw new NotFoundException('O gerente selecionado não pertence a esta unidade.');
+    return managerId;
+  }
+
+  private async ensureManagerMember(team: Team, managerId: string | null) {
+    if (!managerId) return;
+    const exists = await this.teamMemberRepository.exists({
+      where: { unitId: team.unitId, teamId: team.id, userId: managerId },
+    });
+    if (!exists) {
+      await this.teamMemberRepository.save(this.teamMemberRepository.create({
+        unitId: team.unitId,
+        teamId: team.id,
+        userId: managerId,
+      }));
+    }
+  }
+
+  private publicUser(user?: User) {
+    if (!user) return null;
+    return {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      active: user.active,
+      globalRole: user.globalRole,
+    };
+  }
+
+  private serialize(team: Team, members: TeamMember[], usersById: Map<string, User>) {
+    return {
+      ...team,
+      manager: team.managerId ? this.publicUser(usersById.get(team.managerId)) : null,
+      members: members
+        .filter((member) => member.teamId === team.id)
+        .map((member) => ({ ...member, user: this.publicUser(usersById.get(member.userId)) })),
+    };
   }
 }

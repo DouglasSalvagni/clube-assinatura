@@ -207,11 +207,18 @@ export default function OportunidadesPage() {
                       </span>
                     </td>
                     <td className="px-5 py-3">
-                      <button
-                        onClick={(e) => { e.stopPropagation(); router.push(`/dashboard/oportunidades/${t.id}`); }}
-                        className="rounded-md px-2 py-1 text-xs font-medium text-ink-secondary transition-colors hover:bg-surface-canvas hover:text-brand">
-                        Ver
-                      </button>
+                      <div className="flex flex-wrap gap-1">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); router.push(`/dashboard/oportunidades/${t.id}`); }}
+                          className="rounded-md px-2 py-1 text-xs font-medium text-ink-secondary transition-colors hover:bg-surface-canvas hover:text-brand">
+                          Cadastro
+                        </button>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); router.push(`/dashboard/oportunidades/${t.id}/negociacao`); }}
+                          className="rounded-md px-2 py-1 text-xs font-medium text-brand transition-colors hover:bg-brand/10">
+                          Negociação
+                        </button>
+                      </div>
                     </td>
                   </tr>
                   );

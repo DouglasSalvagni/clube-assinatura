@@ -164,6 +164,7 @@ export class PlanPrice extends UnitScopedEntity {
 export class Team extends UnitScopedEntity {
   @Column({ type: 'varchar', length: 160 }) name: string;
   @Column({ type: 'text', nullable: true }) description: string | null;
+  @Column({ name: 'manager_id', type: 'uuid', nullable: true }) managerId: string | null;
   @Column({ type: 'boolean', default: true }) active: boolean;
 }
 

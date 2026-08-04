@@ -6,6 +6,7 @@ import { api, API_BASE } from '@/lib/api';
 import { usePageTitle } from '@/lib/page-title-context';
 import { useDialog } from '@/lib/dialog-context';
 import { formatPhone, formatCpfCnpj, formatCep, maskCpfCnpj, maskPhone, maskCep, stripMask } from '@/lib/format';
+import { OpportunityWorkspaceNav } from '@/components/opportunity-workspace-nav';
 
 const cycleOptions = [
   { value: 'WEEKLY', label: 'Semanal' },
@@ -62,7 +63,7 @@ export default function OportunidadeDetailPage() {
   const [pixResult, setPixResult] = useState<{ subscriptionId: string; pixPayload: string; pixEncodedImage?: string | null; pixExpirationDate?: string | null } | null>(null);
 
   useEffect(() => {
-    setPageTitle('Detalhes da Oportunidade');
+    setPageTitle('Cadastro da oportunidade', 'Dados do cliente, endereço e participantes.');
     const token = localStorage.getItem('accessToken');
     if (!token) { router.push('/login'); return; }
     setLoaded(true);
@@ -203,6 +204,8 @@ export default function OportunidadeDetailPage() {
 
   if (!loaded) return null;
 
+  const workspaceNav = <OpportunityWorkspaceNav opportunityId={id} />;
+
   const fmtBRL = (v: number) =>
     (v || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 
@@ -294,7 +297,9 @@ export default function OportunidadeDetailPage() {
   const canCheckout = statusCheck && opp?.status === 'aberta';
 
   return (
-    <div className="p-8">
+    <div className="space-y-5 p-8">
+      {workspaceNav}
+      <div>
       <button onClick={() => router.push('/dashboard/oportunidades')}
         className="mb-4 flex items-center gap-1 text-sm text-ink-tertiary hover:text-ink">
         <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
@@ -422,7 +427,7 @@ export default function OportunidadeDetailPage() {
           )}
 
           <div className="mb-8 rounded-xl border border-edge bg-surface-elevated p-6 shadow-sm">
-            <h2 className="mb-4 text-lg font-semibold text-ink">Dados da Oportunidade</h2>
+            <h2 className="mb-4 text-lg font-semibold text-ink">Cadastro da oportunidade</h2>
             <div className="grid grid-cols-1 gap-x-8 gap-y-3 sm:grid-cols-2 lg:grid-cols-3">
               {renderField('Nome', 'nome')}
               {renderField('CPF/CNPJ', 'cpfCnpj')}
@@ -616,6 +621,7 @@ export default function OportunidadeDetailPage() {
           </div>
         </>
       )}
+    </div>
     </div>
   );
 }

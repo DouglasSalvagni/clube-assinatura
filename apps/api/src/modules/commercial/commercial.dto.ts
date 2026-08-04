@@ -76,7 +76,7 @@ export class StartAsaasCheckoutDto {
 
 export class CreateCommercialOfferDto {
   @IsString() name: string;
-  @IsString() code: string;
+  @IsOptional() @IsString() code?: string;
   @IsEnum(CustomerType) customerType: CustomerType;
   @IsOptional() @IsString() description?: string;
   @IsOptional() @IsString() publicSlug?: string;
@@ -110,7 +110,7 @@ export class CreateCommercialPipelineDto {
 }
 
 export class CreateCommercialPipelineStageDto {
-  @IsString() code: string;
+  @IsOptional() @IsString() code?: string;
   @IsString() name: string;
   @IsInt() @Min(0) position: number;
   @IsOptional() @IsIn(['DRAFT','NEGOTIATION','PENDING_APPROVAL','APPROVED','CHECKOUT_SENT','CONVERTED','LOST'])
@@ -119,7 +119,7 @@ export class CreateCommercialPipelineStageDto {
 }
 
 export class CreateContractTemplateDto {
-  @IsString() code: string;
+  @IsOptional() @IsString() code?: string;
   @IsString() name: string;
   @IsEnum(CustomerType) customerType: CustomerType;
   @IsOptional() @IsBoolean() active?: boolean;

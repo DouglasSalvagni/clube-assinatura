@@ -38,6 +38,7 @@ export default function AdminLoginPage() {
 
       const data = await res.json();
       localStorage.setItem('accessToken', data.accessToken);
+      localStorage.setItem('refreshToken', data.refreshToken);
       if (data.tenantId) localStorage.setItem('tenantId', data.tenantId);
       router.push('/admin');
     } catch {

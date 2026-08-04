@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 import { Request } from 'express';
@@ -196,6 +196,18 @@ export class CommercialController {
     return this.config.saveOffer(unitId, dto, id);
   }
 
+  @Post('offers/:id/revoke')
+  @RequirePermissions(PERMISSIONS.COMMERCIAL_CONFIG_MANAGE)
+  revokeOffer(@CurrentUnitId() unitId: string, @Param('id') id: string) {
+    return this.config.revokeOffer(unitId, id);
+  }
+
+  @Post('offers/:id/restore')
+  @RequirePermissions(PERMISSIONS.COMMERCIAL_CONFIG_MANAGE)
+  restoreOffer(@CurrentUnitId() unitId: string, @Param('id') id: string) {
+    return this.config.restoreOffer(unitId, id);
+  }
+
   @Post('offers/:id/versions')
   @RequirePermissions(PERMISSIONS.COMMERCIAL_CONFIG_MANAGE)
   createOfferVersion(
@@ -228,6 +240,22 @@ export class CommercialController {
     return this.config.createPipeline(unitId, dto);
   }
 
+  @Patch('pipelines/:id')
+  @RequirePermissions(PERMISSIONS.COMMERCIAL_CONFIG_MANAGE)
+  updatePipeline(
+    @CurrentUnitId() unitId: string,
+    @Param('id') id: string,
+    @Body() dto: CreateCommercialPipelineDto,
+  ) {
+    return this.config.updatePipeline(unitId, id, dto);
+  }
+
+  @Delete('pipelines/:id')
+  @RequirePermissions(PERMISSIONS.COMMERCIAL_CONFIG_MANAGE)
+  removePipeline(@CurrentUnitId() unitId: string, @Param('id') id: string) {
+    return this.config.archivePipeline(unitId, id);
+  }
+
   @Post('pipelines/:id/stages')
   @RequirePermissions(PERMISSIONS.COMMERCIAL_CONFIG_MANAGE)
   createPipelineStage(
@@ -236,6 +264,27 @@ export class CommercialController {
     @Body() dto: CreateCommercialPipelineStageDto,
   ) {
     return this.config.createStage(unitId, id, dto);
+  }
+
+  @Patch('pipelines/:id/stages/:stageId')
+  @RequirePermissions(PERMISSIONS.COMMERCIAL_CONFIG_MANAGE)
+  updatePipelineStage(
+    @CurrentUnitId() unitId: string,
+    @Param('id') id: string,
+    @Param('stageId') stageId: string,
+    @Body() dto: CreateCommercialPipelineStageDto,
+  ) {
+    return this.config.updateStage(unitId, id, stageId, dto);
+  }
+
+  @Delete('pipelines/:id/stages/:stageId')
+  @RequirePermissions(PERMISSIONS.COMMERCIAL_CONFIG_MANAGE)
+  removePipelineStage(
+    @CurrentUnitId() unitId: string,
+    @Param('id') id: string,
+    @Param('stageId') stageId: string,
+  ) {
+    return this.config.archiveStage(unitId, id, stageId);
   }
 
   @Get('contract-templates')

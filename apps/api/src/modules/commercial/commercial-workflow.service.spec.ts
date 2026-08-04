@@ -1,5 +1,6 @@
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import {
+  ApprovalStatus,
   BillingType,
   CommercialStatus,
   ContractStatus,
@@ -32,6 +33,8 @@ function createService(options: {
   feature?: any;
   contracts?: any;
   people?: any;
+  participants?: any;
+  opportunityMembers?: any;
   billingCustomers?: any;
   checkoutSessions?: any;
   subscriptions?: any;
@@ -43,7 +46,16 @@ function createService(options: {
   const opportunities = options.opportunities || repository();
   const sessions = options.sessions || repository();
   const contracts = options.contracts || repository();
-  const people = options.people || repository();
+  const people = options.people || repository({
+    findOneByOrFail: jest.fn().mockResolvedValue({
+      id: 'person-1', name: 'Cliente', taxId: '52998224725', email: 'cliente@example.com',
+      phone: '51999999999', whatsapp: null, postalCode: '90000000', address: 'Rua A',
+      addressNumber: '100', complement: null, district: 'Centro', city: 'Porto Alegre', state: 'RS',
+    }),
+    find: jest.fn().mockResolvedValue([]),
+  });
+  const participants = options.participants || repository();
+  const opportunityMembers = options.opportunityMembers || repository({ find: jest.fn().mockResolvedValue([]) });
   const billingCustomers = options.billingCustomers || repository();
   const checkoutSessions = options.checkoutSessions || repository();
   const subscriptions = options.subscriptions || repository();
@@ -55,8 +67,8 @@ function createService(options: {
     contracts,
     repository(), // acceptances
     sessions,
-    repository(), // participants
-    repository(), // opportunity members
+    participants,
+    opportunityMembers,
     repository(), // team members
     repository(), // offer versions
     repository(), // template versions
@@ -69,7 +81,7 @@ function createService(options: {
     options.feature || { assertEnabled: jest.fn() },
   );
   return {
-    service, policies, approvals, opportunities, people, sessions, contracts,
+    service, policies, approvals, opportunities, people, participants, opportunityMembers, sessions, contracts,
     billingCustomers, checkoutSessions, subscriptions,
   };
 }
@@ -162,6 +174,85 @@ describe('CommercialWorkflowService', () => {
     expect(previous.status).toBe(PrecheckoutStatus.REVOKED);
     expect(previous.revokedAt).toBeInstanceOf(Date);
     expect(result.url).toMatch(/^\/checkout\//);
+  });
+
+
+  it('leva dependentes cadastrados e o valor recalculado para o pré-checkout PF', async () => {
+    const opportunity = {
+      id: 'opportunity-1',
+      unitId: 'unit-1',
+      primaryPersonId: 'holder-1',
+      customerType: CustomerType.PERSON,
+      commercialStatus: CommercialStatus.NEGOTIATION,
+      ownerUserId: 'user-1',
+      billingCycle: 'MONTHLY',
+      billingType: BillingType.CREDIT_CARD,
+      expectedValue: '100.00',
+      negotiationSnapshot: {
+        customerType: CustomerType.PERSON,
+        cycle: 'MONTHLY',
+        billingType: BillingType.CREDIT_CARD,
+        allowedBillingTypes: [BillingType.CREDIT_CARD],
+        participants: { dependentCount: 0 },
+        pricing: { holderAmount: 100, dependentAmount: 25, finalAmount: 100 },
+        discounts: [],
+      },
+    };
+    const opportunities = repository({
+      findOne: jest.fn().mockResolvedValue(opportunity),
+      save: jest.fn().mockImplementation(async value => value),
+    });
+    const people = repository({
+      findOneByOrFail: jest.fn().mockResolvedValue({
+        id: 'holder-1', name: 'Titular', taxId: '52998224725', email: 'titular@example.com',
+        phone: '51999999999', whatsapp: null, postalCode: '90000000', address: 'Rua A',
+        addressNumber: '100', complement: null, district: 'Centro', city: 'Porto Alegre', state: 'RS',
+      }),
+      find: jest.fn().mockResolvedValue([
+        { id: 'dependent-person-1', name: 'Dependente', taxId: '11144477735', birthDate: null },
+      ]),
+    });
+    const opportunityMembers = repository({
+      find: jest.fn().mockResolvedValue([
+        { id: 'member-1', personId: 'dependent-person-1', relationship: 'Filho' },
+      ]),
+    });
+    const participants = repository({
+      save: jest.fn().mockImplementation(async value => value),
+      create: jest.fn(value => value),
+    });
+    const sessions = repository({
+      find: jest.fn().mockResolvedValue([]),
+      save: jest.fn().mockImplementation(async value => ({ id: 'session-1', ...value })),
+    });
+    const pricing = {
+      calculate: jest.fn().mockReturnValue({
+        schemaVersion: 1,
+        customerType: CustomerType.PERSON,
+        cycle: 'MONTHLY',
+        billingType: BillingType.CREDIT_CARD,
+        participants: { dependentCount: 1 },
+        pricing: { holderAmount: 100, dependentAmount: 25, baseAmount: 125, discountAmount: 0, finalAmount: 125 },
+        discounts: [],
+      }),
+    };
+    const { service } = createService({ opportunities, people, opportunityMembers, participants, sessions, pricing });
+    jest.spyOn(service as any, 'assertOpportunityAccess').mockResolvedValue(undefined);
+    jest.spyOn(service as any, 'audit').mockResolvedValue(undefined);
+
+    await service.createPrecheckout('unit-1', 'opportunity-1', 7, 'user-1', UnitRole.SALES, GlobalRole.STANDARD);
+
+    expect(pricing.calculate).toHaveBeenCalledWith(expect.objectContaining({ dependentCount: 1 }));
+    expect(opportunity.expectedValue).toBe('125.00');
+    expect(participants.save).toHaveBeenCalledWith(expect.objectContaining({
+      precheckoutSessionId: 'session-1',
+      name: 'Dependente',
+      relationship: 'Filho',
+    }));
+    expect(sessions.save).toHaveBeenCalledWith(expect.objectContaining({
+      customerData: expect.objectContaining({ name: 'Titular', email: 'titular@example.com' }),
+      pricingSnapshot: expect.objectContaining({ pricing: expect.objectContaining({ finalAmount: 125 }) }),
+    }));
   });
 
   it('não consulta contratos de uma oportunidade de outra unidade', async () => {
@@ -362,6 +453,82 @@ describe('CommercialWorkflowService', () => {
       externalReference: 'opportunity-2',
     }));
     expect(asaas.createCheckout).not.toHaveBeenCalled();
+  });
+
+
+  it('recusa aprovação quando as condições mudaram após a solicitação', async () => {
+    const approvals = repository({
+      findOne: jest.fn().mockResolvedValue({
+        id: 'approval-stale',
+        opportunityId: 'opportunity-1',
+        status: ApprovalStatus.PENDING,
+        requestedConditions: { pricing: { finalAmount: 798 } },
+      }),
+    });
+    const opportunities = repository({
+      findOneByOrFail: jest.fn().mockResolvedValue({
+        id: 'opportunity-1',
+        negotiationSnapshot: { pricing: { finalAmount: 850 } },
+      }),
+    });
+    const { service } = createService({ approvals, opportunities });
+
+    await expect(service.decide(
+      'unit-1',
+      'approval-stale',
+      'manager-1',
+      { decision: 'APPROVED', notes: 'Aprovado' },
+    )).rejects.toBeInstanceOf(ConflictException);
+    expect(approvals.save).not.toHaveBeenCalled();
+  });
+
+  it('reconhece aprovação já concedida para o snapshot atual', async () => {
+    const snapshot = {
+      pricing: { finalAmount: 798 },
+      discounts: [{ type: 'PERCENTAGE', value: 5 }],
+    };
+    const opportunity = {
+      id: 'opportunity-approved',
+      unitId: 'unit-1',
+      ownerUserId: 'user-1',
+      negotiationSnapshot: snapshot,
+    };
+    const opportunities = repository({ findOne: jest.fn().mockResolvedValue(opportunity) });
+    const policies = repository({
+      find: jest.fn().mockResolvedValue([{
+        targetUserId: 'user-1',
+        targetRole: null,
+        maxDiscountPercent: '0',
+        maxDiscountAmount: null,
+        minUnitPrice: null,
+        allowedBillingTypes: [],
+        active: true,
+      }]),
+    });
+    const approvals = repository({
+      find: jest.fn().mockResolvedValue([{
+        id: 'approval-1',
+        status: ApprovalStatus.APPROVED,
+        requestedConditions: snapshot,
+        reason: 'Condição aprovada',
+        decidedAt: new Date(),
+      }]),
+    });
+    const { service } = createService({ opportunities, policies, approvals });
+    jest.spyOn(service as any, 'assertOpportunityAccess').mockResolvedValue(undefined);
+
+    const result = await service.evaluateOpportunity(
+      'unit-1',
+      'opportunity-approved',
+      'user-1',
+      UnitRole.SALES,
+      GlobalRole.STANDARD,
+    );
+
+    expect(result.allowed).toBe(true);
+    expect(result.policyAllowed).toBe(false);
+    expect(result.approvalRequired).toBe(false);
+    expect(result.approval?.id).toBe('approval-1');
   });
 
 });

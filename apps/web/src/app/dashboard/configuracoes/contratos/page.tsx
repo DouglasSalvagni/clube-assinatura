@@ -3,6 +3,7 @@
 import { FormEvent, useCallback, useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 import { usePageTitle } from '@/lib/page-title-context';
+import { toCommercialCode } from '@/lib/commercial-identifiers';
 
 type TemplateVersion = {
   id: string;
@@ -42,6 +43,7 @@ export default function ContractTemplatesPage() {
   const [selectedId, setSelectedId] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [codeEdited, setCodeEdited] = useState(false);
   const [templateForm, setTemplateForm] = useState({
     name: '',
     code: '',
@@ -78,6 +80,7 @@ export default function ContractTemplatesPage() {
       });
       setSelectedId(created.id);
       setTemplateForm({ name: '', code: '', customerType: 'PERSON' });
+      setCodeEdited(false);
       await load();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Falha ao criar modelo.');
@@ -132,8 +135,29 @@ export default function ContractTemplatesPage() {
       <section className="rounded-xl border border-edge bg-surface-elevated p-6">
         <h2 className="text-lg font-semibold">Novo modelo</h2>
         <form onSubmit={createTemplate} className="mt-4 grid gap-3 md:grid-cols-3">
-          <input required placeholder="Nome" value={templateForm.name} onChange={e => setTemplateForm({ ...templateForm, name: e.target.value })} className="rounded-lg border px-3 py-2" />
-          <input required placeholder="Código" value={templateForm.code} onChange={e => setTemplateForm({ ...templateForm, code: e.target.value })} className="rounded-lg border px-3 py-2" />
+          <label className="text-sm">
+            <span className="font-medium">Nome</span>
+            <input
+              required
+              value={templateForm.name}
+              onChange={e => setTemplateForm({
+                ...templateForm,
+                name: e.target.value,
+                code: codeEdited ? templateForm.code : toCommercialCode(e.target.value),
+              })}
+              className="mt-1 w-full rounded-lg border px-3 py-2"
+            />
+          </label>
+          <label className="text-sm">
+            <span className="font-medium">Identificador interno</span>
+            <input
+              placeholder="Gerado automaticamente"
+              value={templateForm.code}
+              onChange={e => { setCodeEdited(true); setTemplateForm({ ...templateForm, code: toCommercialCode(e.target.value) }); }}
+              className="mt-1 w-full rounded-lg border px-3 py-2 font-mono"
+            />
+            <small className="mt-1 block text-xs text-ink-tertiary">Usado para versionamento e integrações; normalmente não precisa ser alterado.</small>
+          </label>
           <select value={templateForm.customerType} onChange={e => setTemplateForm({ ...templateForm, customerType: e.target.value })} className="rounded-lg border px-3 py-2">
             <option value="PERSON">Pessoa física</option>
             <option value="COMPANY">Pessoa jurídica</option>

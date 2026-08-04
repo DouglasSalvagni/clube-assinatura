@@ -61,7 +61,7 @@ async function run() {
     await ensureTeam(AppDataSource, unit.id, 'Equipe Comercial de Testes', [
       usersByUnit[unit.id].manager,
       usersByUnit[unit.id].sales,
-    ]);
+    ], usersByUnit[unit.id].manager);
   }
 
   printCredentials('Usuários de teste criados/atualizados', credentials);

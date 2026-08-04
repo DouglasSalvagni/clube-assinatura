@@ -56,6 +56,10 @@ async function run() {
   const team = await teamRepo.findOne({ where: { unitId: currentUnit.id, name: 'Equipe Comercial de Testes' } });
   if (!team) throw new Error('Equipe comercial de testes não encontrada. Execute primeiro npm run seed:test-users.');
   const currentTeam = team;
+  if (currentTeam.managerId !== manager.id) {
+    currentTeam.managerId = manager.id;
+    await teamRepo.save(currentTeam);
+  }
   const teamMemberRepo = AppDataSource.getRepository(TeamMember);
   for (const user of [manager, sales]) {
     if (!await teamMemberRepo.exists({ where: { unitId: currentUnit.id, teamId: currentTeam.id, userId: user.id } })) {

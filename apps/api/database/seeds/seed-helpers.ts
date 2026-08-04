@@ -101,6 +101,7 @@ export async function ensureTeam(
   unitId: string,
   name: string,
   userIds: string[],
+  managerId?: string,
 ) {
   const teams = dataSource.getRepository(Team);
   const members = dataSource.getRepository(TeamMember);
@@ -110,8 +111,12 @@ export async function ensureTeam(
       unitId,
       name,
       description: 'Equipe criada para testes automatizados e manuais.',
+      managerId: managerId || null,
       active: true,
     }));
+  } else if (managerId && team.managerId !== managerId) {
+    team.managerId = managerId;
+    team = await teams.save(team);
   }
   for (const userId of userIds) {
     const exists = await members.findOne({ where: { unitId, teamId: team.id, userId } });

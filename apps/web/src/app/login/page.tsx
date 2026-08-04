@@ -33,6 +33,7 @@ export default function LoginPage() {
 
       const data = await res.json();
       localStorage.setItem('accessToken', data.accessToken);
+      localStorage.setItem('refreshToken', data.refreshToken);
       if (data.tenantId) localStorage.setItem('tenantId', data.tenantId);
       router.push('/dashboard');
     } catch {

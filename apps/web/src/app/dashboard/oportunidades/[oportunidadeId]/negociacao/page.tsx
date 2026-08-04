@@ -5,6 +5,8 @@ import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { usePageTitle } from '@/lib/page-title-context';
 import { useAuth } from '@/lib/auth-context';
+import { OpportunityWorkspaceNav } from '@/components/opportunity-workspace-nav';
+import { billingTypeLabels, commercialStatusLabels } from '@/lib/commercial-labels';
 
 type Opportunity = {
   id: string;
@@ -32,13 +34,30 @@ type ContractSummary = {
   parentContractId?: string | null;
 };
 
+type ApprovalSummary = {
+  id: string;
+  status: 'PENDING' | 'APPROVED' | 'REJECTED' | 'CANCELLED';
+  reason: string;
+  decisionNotes?: string | null;
+  decidedAt?: string | null;
+  createdAt?: string | null;
+};
+
+type PolicyEvaluation = {
+  allowed: boolean;
+  policyAllowed?: boolean;
+  approvalRequired?: boolean;
+  violations?: string[];
+  approval?: ApprovalSummary | null;
+};
+
 export default function NegotiationWorkspacePage() {
   const { oportunidadeId } = useParams<{ oportunidadeId: string }>();
   const router = useRouter();
   const { setPageTitle } = usePageTitle();
   const { user } = useAuth();
   const [opportunity, setOpportunity] = useState<Opportunity | null>(null);
-  const [evaluation, setEvaluation] = useState<any>(null);
+  const [evaluation, setEvaluation] = useState<PolicyEvaluation | null>(null);
   const [checkoutUrl, setCheckoutUrl] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -72,12 +91,24 @@ export default function NegotiationWorkspacePage() {
       setOpportunity(item);
       setAssignment({ teamId: item.teamId || '', ownerUserId: item.ownerUserId || '' });
       const snapshot = item.negotiationSnapshot || {};
+      const cycle = item.cycle || snapshot.cycle || 'MONTHLY';
+      let allowedBillingTypes: string[] = snapshot.allowedBillingTypes?.length
+        ? snapshot.allowedBillingTypes
+        : [item.billingType || snapshot.billingType || 'CREDIT_CARD'];
+      if (item.customerType === 'PERSON') {
+        allowedBillingTypes = [...new Set([
+          'CREDIT_CARD',
+          ...allowedBillingTypes.filter((type: string) =>
+            type === 'CREDIT_CARD'
+            || (type === 'BOLETO' && cycle === 'MONTHLY')
+            || (type === 'PIX' && cycle === 'YEARLY')),
+        ])];
+      }
+      const preferredBillingType = item.billingType || snapshot.billingType || 'CREDIT_CARD';
       setForm({
-        cycle: item.cycle || snapshot.cycle || 'MONTHLY',
-        billingType: item.billingType || snapshot.billingType || 'CREDIT_CARD',
-        allowedBillingTypes: snapshot.allowedBillingTypes?.length
-          ? snapshot.allowedBillingTypes
-          : [item.billingType || snapshot.billingType || 'CREDIT_CARD'],
+        cycle,
+        billingType: allowedBillingTypes.includes(preferredBillingType) ? preferredBillingType : 'CREDIT_CARD',
+        allowedBillingTypes,
         holderAmount: String(snapshot.pricing?.holderAmount ?? item.valor ?? 0),
         dependentAmount: String(snapshot.pricing?.dependentAmount ?? 0),
         dependentCount: String(snapshot.participants?.dependentCount ?? item.dependentes?.length ?? 0),
@@ -183,7 +214,39 @@ export default function NegotiationWorkspacePage() {
   }
 
 
+  function billingTypeAvailable(type: string, cycle = form.cycle) {
+    if (opportunity?.customerType !== 'PERSON') return true;
+    if (type === 'CREDIT_CARD') return true;
+    if (type === 'BOLETO') return cycle === 'MONTHLY';
+    if (type === 'PIX') return cycle === 'YEARLY';
+    return false;
+  }
+
+  function changeCycle(cycle: string) {
+    setForm(current => {
+      const allowedBillingTypes = opportunity?.customerType === 'PERSON'
+        ? [...new Set([
+            'CREDIT_CARD',
+            ...current.allowedBillingTypes.filter(type => {
+              if (type === 'BOLETO') return cycle === 'MONTHLY';
+              if (type === 'PIX') return cycle === 'YEARLY';
+              return type === 'CREDIT_CARD';
+            }),
+          ])]
+        : current.allowedBillingTypes;
+      return {
+        ...current,
+        cycle,
+        allowedBillingTypes,
+        billingType: allowedBillingTypes.includes(current.billingType)
+          ? current.billingType
+          : 'CREDIT_CARD',
+      };
+    });
+  }
+
   function toggleBillingType(type: string) {
+    if (!billingTypeAvailable(type) || (opportunity?.customerType === 'PERSON' && type === 'CREDIT_CARD')) return;
     setForm(current => {
       const allowedBillingTypes = current.allowedBillingTypes.includes(type)
         ? current.allowedBillingTypes.filter(item => item !== type)
@@ -325,7 +388,7 @@ export default function NegotiationWorkspacePage() {
               <div>
                 <h1 className="text-xl font-semibold">{opportunity.nome}</h1>
                 <p className="mt-1 text-sm text-ink-tertiary">
-                  {opportunity.customerType === 'COMPANY' ? 'Pessoa jurídica' : 'Pessoa física'} · {opportunity.commercialStatus}
+                  {opportunity.customerType === 'COMPANY' ? 'Pessoa jurídica' : 'Pessoa física'} · {commercialStatusLabels[opportunity.commercialStatus] || opportunity.commercialStatus}
                 </p>
               </div>
               <span className="rounded-full bg-brand/10 px-3 py-1 text-sm text-brand">
@@ -362,34 +425,39 @@ export default function NegotiationWorkspacePage() {
             <div className="mt-4 grid gap-3 md:grid-cols-2">
               <label className="text-sm">
                 <span>Periodicidade</span>
-                <select value={form.cycle} onChange={e => setForm({ ...form, cycle: e.target.value })} className="mt-1 w-full rounded-lg border px-3 py-2">
+                <select value={form.cycle} onChange={e => changeCycle(e.target.value)} className="mt-1 w-full rounded-lg border px-3 py-2">
                   <option value="MONTHLY">Mensal</option>
                   <option value="YEARLY">Anual</option>
-                  <option value="QUARTERLY">Trimestral</option>
-                  <option value="SEMIANNUALLY">Semestral</option>
+                  {opportunity.customerType === 'COMPANY' && <option value="QUARTERLY">Trimestral</option>}
+                  {opportunity.customerType === 'COMPANY' && <option value="SEMIANNUALLY">Semestral</option>}
                 </select>
               </label>
               <label className="text-sm">
                 <span>Forma principal de pagamento</span>
                 <select value={form.billingType} onChange={e => setForm({ ...form, billingType: e.target.value })} className="mt-1 w-full rounded-lg border px-3 py-2">
-                  <option value="CREDIT_CARD">Cartão</option>
-                  <option value="BOLETO">Boleto</option>
-                  <option value="PIX">Pix</option>
+                  {form.allowedBillingTypes.map(type => (
+                    <option key={type} value={type}>{billingTypeLabels[type] || type}</option>
+                  ))}
                 </select>
               </label>
               <fieldset className="text-sm md:col-span-2">
                 <legend>Formas permitidas no checkout</legend>
                 <div className="mt-2 flex flex-wrap gap-4">
-                  {['CREDIT_CARD', 'BOLETO', 'PIX'].map(type => (
-                    <label key={type} className="flex items-center gap-2">
-                      <input
-                        type="checkbox"
-                        checked={form.allowedBillingTypes.includes(type)}
-                        onChange={() => toggleBillingType(type)}
-                      />
-                      {type}
-                    </label>
-                  ))}
+                  {['CREDIT_CARD', 'BOLETO', 'PIX'].map(type => {
+                    const available = billingTypeAvailable(type);
+                    const locked = opportunity.customerType === 'PERSON' && type === 'CREDIT_CARD';
+                    return (
+                      <label key={type} className={`flex items-center gap-2 ${available ? '' : 'opacity-40'}`}>
+                        <input
+                          type="checkbox"
+                          checked={form.allowedBillingTypes.includes(type)}
+                          disabled={!available || locked}
+                          onChange={() => toggleBillingType(type)}
+                        />
+                        {billingTypeLabels[type] || type}
+                      </label>
+                    );
+                  })}
                 </div>
               </fieldset>
 
@@ -404,8 +472,11 @@ export default function NegotiationWorkspacePage() {
                     <input type="number" min="0" step="0.01" value={form.dependentAmount} onChange={e => setForm({ ...form, dependentAmount: e.target.value })} className="mt-1 w-full rounded-lg border px-3 py-2" />
                   </label>
                   <label className="text-sm">
-                    <span>Quantidade prevista de dependentes</span>
+                    <span>Quantidade de dependentes</span>
                     <input type="number" min="0" value={form.dependentCount} onChange={e => setForm({ ...form, dependentCount: e.target.value })} className="mt-1 w-full rounded-lg border px-3 py-2" />
+                    <small className="mt-1 block text-xs text-ink-tertiary">
+                      Ao gerar o pré-checkout, o sistema sincroniza esta quantidade com os dependentes efetivamente cadastrados.
+                    </small>
                   </label>
                 </>
               ) : (
@@ -434,17 +505,44 @@ export default function NegotiationWorkspacePage() {
           <section className="rounded-xl border border-edge bg-surface-elevated p-6">
             <h2 className="text-lg font-semibold">Política e aprovação</h2>
             {evaluation ? (
-              <div className="mt-3">
+              <div className="mt-3 space-y-3">
+                {evaluation.approval?.status === 'APPROVED' ? (
+                  <div className="rounded-lg border border-green-200 bg-green-50 p-4 text-sm text-green-800">
+                    <p className="font-semibold">Condição excepcional aprovada</p>
+                    <p className="mt-1">Esta aprovação continua válida enquanto as condições comerciais não forem alteradas.</p>
+                    {evaluation.approval.decisionNotes && <p className="mt-2">Observação: {evaluation.approval.decisionNotes}</p>}
+                    {evaluation.approval.decidedAt && (
+                      <p className="mt-1 text-xs text-green-700">Aprovada em {new Date(evaluation.approval.decidedAt).toLocaleString('pt-BR')}.</p>
+                    )}
+                  </div>
+                ) : evaluation.approval?.status === 'PENDING' ? (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
+                    <p className="font-semibold">Aguardando aprovação</p>
+                    <p className="mt-1">Solicitação enviada: {evaluation.approval.reason}</p>
+                  </div>
+                ) : evaluation.approval?.status === 'REJECTED' ? (
+                  <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+                    <p className="font-semibold">Condição rejeitada</p>
+                    {evaluation.approval.decisionNotes && <p className="mt-1">Motivo: {evaluation.approval.decisionNotes}</p>}
+                  </div>
+                ) : null}
+
                 <p className={`text-sm font-medium ${evaluation.allowed ? 'text-green-700' : 'text-red-700'}`}>
-                  {evaluation.allowed ? 'Condições dentro dos limites.' : 'A negociação possui exceções.'}
+                  {evaluation.allowed
+                    ? evaluation.policyAllowed === false
+                      ? 'A negociação está liberada pela aprovação concedida.'
+                      : 'Condições dentro dos limites do usuário.'
+                    : opportunity.customerType === 'COMPANY' && evaluation.policyAllowed
+                      ? 'A negociação jurídica precisa de aprovação final antes do checkout.'
+                      : 'A negociação possui exceções que exigem aprovação.'}
                 </p>
-                {!!evaluation.violations?.length && (
-                  <ul className="mt-2 list-disc pl-5 text-sm text-red-700">
+                {!!evaluation.violations?.length && evaluation.policyAllowed === false && (
+                  <ul className="list-disc pl-5 text-sm text-red-700">
                     {evaluation.violations.map((violation: string) => <li key={violation}>{violation}</li>)}
                   </ul>
                 )}
-                {!evaluation.allowed && (
-                  <button onClick={requestApproval} disabled={busy || opportunity.commercialStatus === 'PENDING_APPROVAL'} className="mt-4 rounded-lg border px-4 py-2 text-sm disabled:opacity-50">
+                {evaluation.approvalRequired && evaluation.approval?.status !== 'PENDING' && (
+                  <button onClick={requestApproval} disabled={busy} className="rounded-lg border px-4 py-2 text-sm disabled:opacity-50">
                     Solicitar aprovação
                   </button>
                 )}
@@ -462,7 +560,7 @@ export default function NegotiationWorkspacePage() {
             <div className="mt-4 flex flex-wrap gap-2">
               <button
                 onClick={generatePrecheckout}
-                disabled={busy || opportunity.commercialStatus === 'PENDING_APPROVAL'}
+                disabled={busy || evaluation?.approvalRequired === true || evaluation?.approval?.status === 'PENDING'}
                 className="rounded-lg bg-brand px-4 py-2 text-sm text-white disabled:opacity-50"
               >
                 Gerar e copiar link

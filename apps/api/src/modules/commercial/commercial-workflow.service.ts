@@ -1,7 +1,7 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { createHash, randomBytes } from 'crypto';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import {
   ApprovalRequest, ApprovalStatus, AuditLog, BillingCustomer, BillingProviderName, BillingType, CheckoutSession,
   CheckoutStatus, CommercialOfferVersion, CommercialStatus, Contract, ContractAcceptance, ContractRelationType, ContractStatus,
@@ -103,7 +103,19 @@ export class CommercialWorkflowService {
     const opportunity = await this.opportunities.findOne({ where: { unitId, id: opportunityId } });
     if (!opportunity) throw new NotFoundException('Oportunidade não encontrada.');
     await this.assertOpportunityAccess(opportunity, userId, role, globalRole);
-    return this.evaluate(unitId, userId, role, opportunity.negotiationSnapshot);
+    const evaluation = await this.evaluate(unitId, userId, role, opportunity.negotiationSnapshot);
+    const approval = await this.currentApproval(unitId, opportunityId, opportunity.negotiationSnapshot);
+    const approvedException = approval?.status === ApprovalStatus.APPROVED;
+    const companyApprovalRequired = opportunity.customerType === CustomerType.COMPANY && !approvedException;
+    return {
+      ...evaluation,
+      policyAllowed: evaluation.allowed,
+      allowed: opportunity.customerType === CustomerType.COMPANY
+        ? approvedException
+        : evaluation.allowed || approvedException,
+      approvalRequired: companyApprovalRequired || (!evaluation.allowed && !approvedException),
+      approval,
+    };
   }
 
   async requestApproval(unitId: string, opportunityId: string, userId: string, role: UnitRole | null, dto: RequestApprovalDto) {
@@ -111,7 +123,12 @@ export class CommercialWorkflowService {
     if (!opportunity) throw new NotFoundException('Oportunidade não encontrada.');
     await this.assertOpportunityAccess(opportunity, userId, role, GlobalRole.STANDARD);
     const evaluation = await this.evaluate(unitId, userId, role, opportunity.negotiationSnapshot);
-    if (evaluation.allowed) throw new BadRequestException('A negociação está dentro dos limites e não exige aprovação.');
+    if (evaluation.allowed && opportunity.customerType !== CustomerType.COMPANY) {
+      throw new BadRequestException('A negociação está dentro dos limites e não exige aprovação.');
+    }
+    const current = await this.currentApproval(unitId, opportunityId, opportunity.negotiationSnapshot);
+    if (current?.status === ApprovalStatus.APPROVED) return current;
+    if (current?.status === ApprovalStatus.PENDING) return current;
     await this.approvals.update({ unitId, opportunityId, status: ApprovalStatus.PENDING }, { status: ApprovalStatus.CANCELLED });
     opportunity.commercialStatus = CommercialStatus.PENDING_APPROVAL;
     await this.opportunities.save(opportunity);
@@ -132,9 +149,13 @@ export class CommercialWorkflowService {
     const approval = await this.approvals.findOne({ where: { unitId, id: approvalId } });
     if (!approval) throw new NotFoundException('Solicitação não encontrada.');
     if (approval.status !== ApprovalStatus.PENDING) throw new ConflictException('Solicitação já decidida.');
+    const opportunity = await this.opportunities.findOneByOrFail({ unitId, id: approval.opportunityId });
+    if (dto.decision === 'APPROVED'
+      && this.canonical(opportunity.negotiationSnapshot || {}) !== this.canonical(approval.requestedConditions || {})) {
+      throw new ConflictException('As condições da negociação mudaram após a solicitação. Gere uma nova aprovação.');
+    }
     approval.status = dto.decision === 'APPROVED' ? ApprovalStatus.APPROVED : ApprovalStatus.REJECTED;
     approval.decidedBy = userId; approval.decisionNotes = dto.notes || null; approval.decidedAt = new Date();
-    const opportunity = await this.opportunities.findOneByOrFail({ unitId, id: approval.opportunityId });
     opportunity.commercialStatus = approval.status === ApprovalStatus.APPROVED ? CommercialStatus.APPROVED : CommercialStatus.NEGOTIATION;
     await this.opportunities.save(opportunity);
     const saved = await this.approvals.save(approval);
@@ -347,20 +368,15 @@ export class CommercialWorkflowService {
     if (userId) {
       await this.assertOpportunityAccess(opportunity, userId, role || null, globalRole || GlobalRole.STANDARD);
       const evaluation = await this.evaluate(unitId, userId, role || null, opportunity.negotiationSnapshot);
-      if (!evaluation.allowed) {
-        const approvals = await this.approvals.find({
-          where: { unitId, opportunityId, status: ApprovalStatus.APPROVED },
-          order: { decidedAt: 'DESC' },
-        });
-        const currentSnapshot = JSON.stringify(opportunity.negotiationSnapshot || {});
-        const validApproval = approvals.some(
-          (approval) => JSON.stringify(approval.requestedConditions || {}) === currentSnapshot,
-        );
-        if (!validApproval) throw new BadRequestException('A negociação possui condições sem aprovação válida.');
+      const approval = await this.currentApproval(unitId, opportunityId, opportunity.negotiationSnapshot);
+      const hasApprovedException = approval?.status === ApprovalStatus.APPROVED;
+      if (!evaluation.allowed && !hasApprovedException) {
+        throw new BadRequestException('A negociação possui condições sem aprovação válida.');
+      }
+      if (opportunity.customerType === CustomerType.COMPANY && !hasApprovedException) {
+        throw new BadRequestException('A negociação jurídica precisa estar aprovada.');
       }
     }
-    if (opportunity.customerType === CustomerType.COMPANY && opportunity.commercialStatus !== CommercialStatus.APPROVED)
-      throw new BadRequestException('A negociação jurídica precisa estar aprovada.');
 
     const previousSessions = await this.sessions.find({ where: { unitId, opportunityId } });
     if (previousSessions.some((item) =>
@@ -374,14 +390,94 @@ export class CommercialWorkflowService {
       await this.sessions.save(previous);
     }
 
+    const primaryPerson = await this.people.findOneByOrFail({
+      id: opportunity.primaryPersonId,
+      unitId,
+    });
+    const opportunityDependents = opportunity.customerType === CustomerType.PERSON
+      ? await this.opportunityMembers.find({
+          where: { unitId, opportunityId, role: MemberRole.DEPENDENT },
+          order: { createdAt: 'ASC' },
+        })
+      : [];
+    const dependentPeople = opportunityDependents.length
+      ? await this.people.find({
+          where: { unitId, id: In(opportunityDependents.map((member) => member.personId)) },
+        })
+      : [];
+
+    let pricingSnapshot = opportunity.negotiationSnapshot || {};
+    if (opportunity.customerType === CustomerType.PERSON && pricingSnapshot?.pricing) {
+      const cycle = pricingSnapshot.cycle || opportunity.billingCycle;
+      if (cycle) {
+        const calculation = this.pricing.calculate({
+          customerType: CustomerType.PERSON,
+          cycle,
+          billingType: pricingSnapshot.billingType || opportunity.billingType,
+          baseAmount: Number(pricingSnapshot.pricing.holderAmount ?? pricingSnapshot.pricing.baseAmount ?? 0),
+          dependentAmount: Number(pricingSnapshot.pricing.dependentAmount ?? 0),
+          dependentCount: opportunityDependents.length,
+          discounts: pricingSnapshot.discounts || [],
+        });
+        pricingSnapshot = {
+          ...calculation,
+          allowedBillingTypes: pricingSnapshot.allowedBillingTypes,
+          limits: pricingSnapshot.limits,
+          offer: pricingSnapshot.offer,
+          source: pricingSnapshot.source,
+          policyEvaluation: pricingSnapshot.policyEvaluation,
+        };
+        opportunity.negotiationSnapshot = pricingSnapshot;
+        opportunity.expectedValue = Number(calculation.pricing.finalAmount).toFixed(2);
+        await this.opportunities.save(opportunity);
+      }
+    }
+
     const token = randomBytes(32).toString('hex');
     const session = await this.sessions.save(this.sessions.create({
-      unitId, opportunityId, contractId: null, checkoutSessionId: null, tokenHash: this.hash(token),
-      status: PrecheckoutStatus.CREATED, expiresAt: new Date(Date.now() + expiresInDays * 86400000),
-      revokedAt: null, customerData: {}, pricingSnapshot: opportunity.negotiationSnapshot || {},
+      unitId,
+      opportunityId,
+      contractId: null,
+      checkoutSessionId: null,
+      tokenHash: this.hash(token),
+      status: PrecheckoutStatus.CREATED,
+      expiresAt: new Date(Date.now() + expiresInDays * 86400000),
+      revokedAt: null,
+      customerData: {
+        name: primaryPerson.name,
+        taxId: primaryPerson.taxId,
+        email: primaryPerson.email,
+        phone: primaryPerson.phone || primaryPerson.whatsapp,
+        postalCode: primaryPerson.postalCode,
+        address: primaryPerson.address,
+        addressNumber: primaryPerson.addressNumber,
+        complement: primaryPerson.complement,
+        district: primaryPerson.district,
+        city: primaryPerson.city,
+        state: primaryPerson.state,
+      },
+      pricingSnapshot,
     }));
-    await this.audit(unitId, null, 'precheckout.created', 'precheckout_session', session.id, null, {
-      opportunityId, expiresAt: session.expiresAt,
+
+    for (const member of opportunityDependents) {
+      const person = dependentPeople.find((item) => item.id === member.personId);
+      if (!person) continue;
+      await this.participants.save(this.participants.create({
+        unitId,
+        precheckoutSessionId: session.id,
+        role: MemberRole.DEPENDENT,
+        name: person.name,
+        taxId: person.taxId || '',
+        birthDate: person.birthDate,
+        relationship: member.relationship,
+      }));
+    }
+
+    await this.audit(unitId, userId || null, 'precheckout.created', 'precheckout_session', session.id, null, {
+      opportunityId,
+      expiresAt: session.expiresAt,
+      prefilledDependents: opportunityDependents.length,
+      finalAmount: pricingSnapshot?.pricing?.finalAmount ?? opportunity.expectedValue,
     });
     return { id: session.id, token, expiresAt: session.expiresAt, url: `/checkout/${token}` };
   }
@@ -1047,6 +1143,26 @@ As demais cláusulas do contrato de origem permanecem inalteradas.`;
         }));
       }
     }
+  }
+
+  private async currentApproval(unitId: string, opportunityId: string, snapshot: Record<string, any>) {
+    const approvals = await this.approvals.find({
+      where: { unitId, opportunityId },
+      order: { createdAt: 'DESC' },
+    });
+    const currentSnapshot = this.canonical(snapshot || {});
+    return approvals.find((approval) =>
+      approval.status !== ApprovalStatus.CANCELLED
+      && this.canonical(approval.requestedConditions || {}) === currentSnapshot,
+    ) || null;
+  }
+
+  private canonical(value: any): string {
+    if (Array.isArray(value)) return `[${value.map((item) => this.canonical(item)).join(',')}]`;
+    if (value && typeof value === 'object') {
+      return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${this.canonical(value[key])}`).join(',')}}`;
+    }
+    return JSON.stringify(value);
   }
 
   private async assertOpportunityAccess(

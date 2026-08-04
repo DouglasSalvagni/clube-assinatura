@@ -72,8 +72,16 @@ export class CommercialConfigService {
   }
 
   async saveOffer(unitId: string, dto: CreateCommercialOfferDto, id?: string) {
-    const code = dto.code.trim().toUpperCase().replace(/[^A-Z0-9_-]+/g, '_');
-    const publicSlug = dto.publicSlug?.trim().toLowerCase().replace(/[^a-z0-9-]+/g, '-') || null;
+    const current = id ? await this.offers.findOne({ where: { unitId, id } }) : null;
+    if (id && !current) throw new NotFoundException('Oferta não encontrada.');
+
+    const code = dto.code?.trim()
+      ? this.normalizeCode(dto.code)
+      : current?.code || await this.nextAvailableCode(this.offers, unitId, dto.name, id);
+    const publicSlug = dto.publicSlug?.trim()
+      ? this.normalizeSlug(dto.publicSlug)
+      : dto.publicSlug === '' ? null : current?.publicSlug || null;
+
     const duplicate = await this.offers.findOne({ where: { unitId, code } });
     if (duplicate && duplicate.id !== id) throw new ConflictException('Já existe uma oferta com este código.');
     if (publicSlug) {
@@ -95,8 +103,6 @@ export class CommercialConfigService {
       throw new BadRequestException('O responsável selecionado não pertence ao time de atribuição.');
     }
 
-    const current = id ? await this.offers.findOne({ where: { unitId, id } }) : null;
-    if (id && !current) throw new NotFoundException('Oferta não encontrada.');
     const offer = current || this.offers.create({
       unitId,
       status: CommercialOfferStatus.DRAFT,
@@ -114,6 +120,27 @@ export class CommercialConfigService {
       active: dto.active !== false,
       metadata: dto.metadata || offer.metadata || {},
     });
+    if (offer.status === CommercialOfferStatus.ARCHIVED && offer.active) {
+      offer.status = CommercialOfferStatus.DRAFT;
+    }
+    return this.offers.save(offer);
+  }
+
+  async revokeOffer(unitId: string, id: string) {
+    const offer = await this.offer(unitId, id);
+    offer.status = CommercialOfferStatus.ARCHIVED;
+    offer.active = false;
+    await this.offerVersions.update(
+      { unitId, offerId: id, status: CommercialOfferVersionStatus.PUBLISHED },
+      { status: CommercialOfferVersionStatus.RETIRED },
+    );
+    return this.offers.save(offer);
+  }
+
+  async restoreOffer(unitId: string, id: string) {
+    const offer = await this.offer(unitId, id);
+    offer.status = CommercialOfferStatus.DRAFT;
+    offer.active = true;
     return this.offers.save(offer);
   }
 
@@ -177,27 +204,86 @@ export class CommercialConfigService {
   }
 
   async createPipeline(unitId: string, dto: CreateCommercialPipelineDto) {
+    const name = dto.name.trim();
+    if (await this.pipelines.exists({ where: { unitId, name } })) {
+      throw new ConflictException('Já existe um funil com este nome.');
+    }
     if (dto.isDefault) await this.pipelines.update({ unitId, isDefault: true }, { isDefault: false });
     return this.pipelines.save(this.pipelines.create({
       unitId,
-      name: dto.name.trim(),
+      name,
       isDefault: dto.isDefault === true,
       active: dto.active !== false,
     }));
   }
 
+  async updatePipeline(unitId: string, id: string, dto: CreateCommercialPipelineDto) {
+    const pipeline = await this.pipelines.findOne({ where: { unitId, id } });
+    if (!pipeline) throw new NotFoundException('Funil não encontrado.');
+    const name = dto.name.trim();
+    const duplicate = await this.pipelines.findOne({ where: { unitId, name } });
+    if (duplicate && duplicate.id !== id) throw new ConflictException('Já existe um funil com este nome.');
+    if (dto.isDefault) await this.pipelines.update({ unitId, isDefault: true }, { isDefault: false });
+    pipeline.name = name;
+    pipeline.isDefault = dto.isDefault === true;
+    pipeline.active = dto.active !== false;
+    return this.pipelines.save(pipeline);
+  }
+
+  async archivePipeline(unitId: string, id: string) {
+    const pipeline = await this.pipelines.findOne({ where: { unitId, id } });
+    if (!pipeline) throw new NotFoundException('Funil não encontrado.');
+    pipeline.active = false;
+    pipeline.isDefault = false;
+    await this.stages.update({ unitId, pipelineId: id }, { active: false });
+    return this.pipelines.save(pipeline);
+  }
+
   async createStage(unitId: string, pipelineId: string, dto: CreateCommercialPipelineStageDto) {
     const pipeline = await this.pipelines.findOne({ where: { unitId, id: pipelineId } });
     if (!pipeline) throw new NotFoundException('Funil não encontrado.');
+    const code = dto.code?.trim()
+      ? this.normalizeCode(dto.code)
+      : await this.nextAvailableStageCode(unitId, pipelineId, dto.name);
+    const duplicate = await this.stages.findOne({ where: { unitId, pipelineId, code } });
+    if (duplicate) throw new ConflictException('Já existe uma etapa com este identificador no funil.');
     return this.stages.save(this.stages.create({
       unitId,
       pipelineId,
-      code: dto.code.trim().toUpperCase().replace(/[^A-Z0-9_-]+/g, '_'),
+      code,
       name: dto.name.trim(),
       position: dto.position,
       commercialStatus: (dto.commercialStatus as CommercialStatus) || null,
       active: dto.active !== false,
     }));
+  }
+
+  async updateStage(
+    unitId: string,
+    pipelineId: string,
+    stageId: string,
+    dto: CreateCommercialPipelineStageDto,
+  ) {
+    const stage = await this.stages.findOne({ where: { unitId, pipelineId, id: stageId } });
+    if (!stage) throw new NotFoundException('Etapa não encontrada.');
+    const code = dto.code?.trim() ? this.normalizeCode(dto.code) : stage.code;
+    const duplicate = await this.stages.findOne({ where: { unitId, pipelineId, code } });
+    if (duplicate && duplicate.id !== stageId) {
+      throw new ConflictException('Já existe uma etapa com este identificador no funil.');
+    }
+    stage.name = dto.name.trim();
+    stage.code = code;
+    stage.position = dto.position;
+    stage.commercialStatus = (dto.commercialStatus as CommercialStatus) || null;
+    stage.active = dto.active !== false;
+    return this.stages.save(stage);
+  }
+
+  async archiveStage(unitId: string, pipelineId: string, stageId: string) {
+    const stage = await this.stages.findOne({ where: { unitId, pipelineId, id: stageId } });
+    if (!stage) throw new NotFoundException('Etapa não encontrada.');
+    stage.active = false;
+    return this.stages.save(stage);
   }
 
   async listTemplates(unitId: string) {
@@ -212,7 +298,9 @@ export class CommercialConfigService {
   }
 
   async createTemplate(unitId: string, dto: CreateContractTemplateDto) {
-    const code = dto.code.trim().toUpperCase().replace(/[^A-Z0-9_-]+/g, '_');
+    const code = dto.code?.trim()
+      ? this.normalizeCode(dto.code)
+      : await this.nextAvailableCode(this.templates, unitId, dto.name);
     if (await this.templates.exists({ where: { unitId, code } })) {
       throw new ConflictException('Já existe um modelo com este código.');
     }
@@ -485,13 +573,50 @@ export class CommercialConfigService {
   ) {
     const unique = [...new Set((configured || []).filter((type) => type !== BillingType.UNDEFINED))];
     if (customerType !== CustomerType.PERSON) return unique;
+    const monthly = cycle === BillingCycle.MONTHLY;
     const yearly = cycle === BillingCycle.YEARLY;
     return unique.filter((type) => {
       if (type === BillingType.CREDIT_CARD) return true;
-      if (type === BillingType.BOLETO) return !yearly && pricingRules.allowMonthlyBoleto === true;
+      if (type === BillingType.BOLETO) return monthly && pricingRules.allowMonthlyBoleto === true;
       if (type === BillingType.PIX) return yearly;
       return false;
     });
+  }
+
+  private normalizeCode(value: string) {
+    return value.trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .toUpperCase().replace(/[^A-Z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || 'ITEM';
+  }
+
+  private normalizeSlug(value: string) {
+    return value.trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  }
+
+  private async nextAvailableCode(
+    repository: Repository<any>,
+    unitId: string,
+    name: string,
+    excludedId?: string,
+  ) {
+    const base = this.normalizeCode(name);
+    let candidate = base;
+    let suffix = 2;
+    while (true) {
+      const existing = await repository.findOne({ where: { unitId, code: candidate } });
+      if (!existing || existing.id === excludedId) return candidate;
+      candidate = `${base}_${suffix++}`;
+    }
+  }
+
+  private async nextAvailableStageCode(unitId: string, pipelineId: string, name: string) {
+    const base = this.normalizeCode(name);
+    let candidate = base;
+    let suffix = 2;
+    while (await this.stages.exists({ where: { unitId, pipelineId, code: candidate } })) {
+      candidate = `${base}_${suffix++}`;
+    }
+    return candidate;
   }
 
   private validateTemplateVariables(content: string, declared: string[]) {

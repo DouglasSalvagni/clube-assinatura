@@ -175,27 +175,48 @@ export default function OpportunitiesKanbanPage() {
                 {column.items.length === 0 ? (
                   <p className="py-6 text-center text-xs text-ink-muted">Nenhuma oportunidade</p>
                 ) : column.items.map((item) => (
-                  <button
+                  <article
                     key={item.id}
                     draggable
-                    disabled={moving === item.id}
                     onDragStart={event => event.dataTransfer.setData('text/opportunity-id', item.id)}
-                    onClick={() => router.push(`/dashboard/oportunidades/${item.id}/negociacao`)}
-                    className="block w-full rounded-lg border border-edge bg-surface-canvas p-3 text-left transition hover:border-brand/40 disabled:opacity-50"
+                    className={`rounded-lg border border-edge bg-surface-canvas p-3 transition hover:border-brand/40 ${moving === item.id ? 'opacity-50' : ''}`}
                   >
-                    <div className="flex items-start justify-between gap-2">
-                      <strong className="text-sm font-medium text-ink">{item.nome}</strong>
-                      <span className="text-[10px] font-medium text-ink-tertiary">
-                        {item.customerType === 'COMPANY' ? 'PJ' : 'PF'}
-                      </span>
+                    <button
+                      type="button"
+                      disabled={moving === item.id}
+                      onClick={() => router.push(`/dashboard/oportunidades/${item.id}/negociacao`)}
+                      className="block w-full text-left disabled:cursor-wait"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <strong className="text-sm font-medium text-ink">{item.nome}</strong>
+                        <span className="text-[10px] font-medium text-ink-tertiary">
+                          {item.customerType === 'COMPANY' ? 'PJ' : 'PF'}
+                        </span>
+                      </div>
+                      <p className="mt-2 text-sm font-semibold text-brand">
+                        {Number(item.valor || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}
+                      </p>
+                      <p className="mt-1 text-[11px] text-ink-tertiary">
+                        {labels[item.commercialStatus] || item.commercialStatus}
+                      </p>
+                    </button>
+                    <div className="mt-3 grid grid-cols-2 gap-2 border-t border-edge pt-2">
+                      <button
+                        type="button"
+                        onClick={() => router.push(`/dashboard/oportunidades/${item.id}`)}
+                        className="rounded-md px-2 py-1.5 text-xs text-ink-secondary hover:bg-surface-elevated hover:text-ink"
+                      >
+                        Cadastro
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => router.push(`/dashboard/oportunidades/${item.id}/negociacao`)}
+                        className="rounded-md bg-brand/10 px-2 py-1.5 text-xs font-medium text-brand hover:bg-brand/15"
+                      >
+                        Negociação
+                      </button>
                     </div>
-                    <p className="mt-2 text-sm font-semibold text-brand">
-                      {Number(item.valor || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}
-                    </p>
-                    <p className="mt-1 text-[11px] text-ink-tertiary">
-                      {labels[item.commercialStatus] || item.commercialStatus}
-                    </p>
-                  </button>
+                  </article>
                 ))}
               </div>
             </section>
