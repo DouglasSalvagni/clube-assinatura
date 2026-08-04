@@ -51,6 +51,9 @@ services:
       DATABASE_URL: ${DATABASE_INTERNAL_URL:-postgresql://club:club@postgres:5432/club_platform}
       REDIS_URL: ${REDIS_INTERNAL_URL:-redis://redis:6379/0}
       API_URL: ${API_URL:-http://localhost:4003}
+      PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:4003}
+      ASAAS_REQUEST_TIMEOUT_MS: ${ASAAS_REQUEST_TIMEOUT_MS:-12000}
+      ASAAS_FORCE_IPV4: ${ASAAS_FORCE_IPV4:-false}
     ports:
       - "${API_PORT:-4003}:4003"
     depends_on:

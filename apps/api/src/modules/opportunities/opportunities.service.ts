@@ -219,12 +219,157 @@ export class OpportunitiesService {
   async updateDependent(unitId:string,id:string,memberId:string,dto:UpdateOpportunityDependentDto,userId?:string,unitRole?:UnitRole|null,globalRole?:GlobalRole){await this.getEntity(unitId,id,userId,unitRole,globalRole);const m=await this.memberRepo.findOne({where:{unitId,opportunityId:id,id:memberId,role:MemberRole.DEPENDENT}});if(!m)throw new NotFoundException('Dependente não encontrado.');const p=await this.personRepo.findOneByOrFail({unitId,id:m.personId});if(dto.nome!==undefined)p.name=dto.nome;if(dto.cpf!==undefined)p.taxId=dto.cpf;if(dto.dataNascimento!==undefined)p.birthDate=dto.dataNascimento;if(dto.relationship!==undefined)m.relationship=dto.relationship;await this.personRepo.save(p);await this.memberRepo.save(m);return{id:m.id,nome:p.name,cpf:p.taxId}}
   async deleteDependent(unitId:string,id:string,memberId:string,userId?:string,unitRole?:UnitRole|null,globalRole?:GlobalRole){await this.getEntity(unitId,id,userId,unitRole,globalRole);const m=await this.memberRepo.findOne({where:{unitId,opportunityId:id,id:memberId,role:MemberRole.DEPENDENT}});if(!m)throw new NotFoundException('Dependente não encontrado.');await this.memberRepo.delete(m.id)}
 
-  async generateCheckout(unitId:string,id:string,user:User,unitRole?:UnitRole|null){
-    const commercialV2=await this.commercialFeature.status(unitId);
-    if(commercialV2.enabled)throw new ConflictException('O checkout legado está desativado nesta sede. Gere o pré-checkout comercial com contrato.');
-    const opp=await this.getEntity(unitId,id,user.id,unitRole,user.globalRole);if(opp.customerType===CustomerType.COMPANY&&opp.commercialStatus!==CommercialStatus.APPROVED)throw new BadRequestException('Negociação de pessoa jurídica precisa estar aprovada antes do checkout.');const detail=await this.detail(unitId,id);const pending=this.pending(detail);if(pending.length)throw new BadRequestException({errors:[{code:'checkout_not_ready',description:`Campos obrigatórios pendentes: ${pending.join(', ')}`}]});const person=await this.personRepo.findOneByOrFail({unitId,id:opp.primaryPersonId});const customer=await this.ensureCustomer(unitId,opp,person);const cycle=opp.billingCycle||BillingCycle.MONTHLY;const value=Number(opp.expectedValue||0);const next=new Date();next.setDate(next.getDate()+1);const nextDueDate=next.toISOString().slice(0,10);const callback=(process.env.APP_URL||'http://localhost:4002').replace(/\/$/,'');
-    if([BillingType.BOLETO,BillingType.PIX].includes(opp.billingType as BillingType)){const billingType=opp.billingType as BillingType;const external=await this.asaas.createSubscription(unitId,{customer:customer.externalId,billingType,value,nextDueDate,cycle,description:process.env.APP_NAME||'Clube de Assinatura',externalReference:opp.id});const payments=await this.asaas.subscriptionPayments(unitId,external.id,'PENDING',1);const first=payments.data?.[0];if(!first?.id)throw new BadRequestException('O Asaas criou a assinatura, mas não retornou a primeira cobrança. Execute a reconciliação antes de tentar novamente.');const local=await this.createPendingSubscription(opp,external.id);const pix=billingType===BillingType.PIX?await this.asaas.pixQrCode(unitId,first.id):null;const checkout=await this.checkoutRepo.save(this.checkoutRepo.create({unitId,opportunityId:opp.id,billingCustomerId:customer.id,provider:BillingProviderName.ASAAS,externalId:external.id,status:CheckoutStatus.PENDING,url:first?.bankSlipUrl||first?.invoiceUrl||null,expiresAt:pix?.expirationDate?new Date(pix.expirationDate):null,payload:{paymentId:first.id,bankSlipUrl:first?.bankSlipUrl||null,invoiceUrl:first?.invoiceUrl||null,subscriptionId:local.id,pixPayload:pix?.payload||null,pixEncodedImage:pix?.encodedImage||null,pixExpirationDate:pix?.expirationDate||null}}));opp.status=OpportunityStatus.CHECKOUT_PENDING;opp.commercialStatus=CommercialStatus.CHECKOUT_SENT;await this.repo.save(opp);if(billingType===BillingType.PIX)return{subscriptionId:external.id,paymentId:first.id,pixPayload:pix?.payload||null,pixEncodedImage:pix?.encodedImage||null,pixExpirationDate:pix?.expirationDate||null,invoiceUrl:first?.invoiceUrl||null};return{subscriptionId:external.id,boletoUrl:checkout.payload.bankSlipUrl||checkout.url};}
-    const result=await this.asaas.createCheckout(unitId,{billingTypes:['CREDIT_CARD'],chargeTypes:['RECURRENT'],minutesToExpire:1440,externalReference:opp.id,customer:customer.externalId,items:[{name:process.env.APP_NAME||'Clube de Assinatura',quantity:1,value}],subscription:{cycle,nextDueDate},callback:{successUrl:`${callback}/dashboard/oportunidades`,cancelUrl:`${callback}/dashboard/oportunidades`}});const checkout=await this.checkoutRepo.save(this.checkoutRepo.create({unitId,opportunityId:opp.id,billingCustomerId:customer.id,provider:BillingProviderName.ASAAS,externalId:result.id,status:CheckoutStatus.PENDING,url:result.link,expiresAt:new Date(Date.now()+86400000),payload:{}}));opp.status=OpportunityStatus.CHECKOUT_PENDING;opp.commercialStatus=CommercialStatus.CHECKOUT_SENT;await this.repo.save(opp);return{checkoutId:checkout.externalId,checkoutLink:checkout.url,expiresAt:checkout.expiresAt};}
+  async generateCheckout(unitId: string, id: string, user: User, unitRole?: UnitRole | null) {
+    const commercialV2 = await this.commercialFeature.status(unitId);
+    if (commercialV2.enabled) {
+      throw new ConflictException(
+        'O checkout legado está desativado nesta sede. Gere o pré-checkout comercial com contrato.',
+      );
+    }
+
+    const opp = await this.getEntity(unitId, id, user.id, unitRole, user.globalRole);
+    if (opp.customerType === CustomerType.COMPANY && opp.commercialStatus !== CommercialStatus.APPROVED) {
+      throw new BadRequestException('Negociação de pessoa jurídica precisa estar aprovada antes do checkout.');
+    }
+
+    const detail = await this.detail(unitId, id);
+    const pending = this.pending(detail);
+    if (pending.length) {
+      throw new BadRequestException({
+        errors: [{ code: 'checkout_not_ready', description: `Campos obrigatórios pendentes: ${pending.join(', ')}` }],
+      });
+    }
+
+    const person = await this.personRepo.findOneByOrFail({ unitId, id: opp.primaryPersonId });
+    const customer = await this.ensureCustomer(unitId, opp, person);
+    const cycle = opp.billingCycle || BillingCycle.MONTHLY;
+    const value = Number(opp.expectedValue || 0);
+    const next = new Date();
+    next.setDate(next.getDate() + 1);
+    const nextDueDate = next.toISOString().slice(0, 10);
+    const callback = (process.env.APP_URL || 'http://localhost:4002').replace(/\/$/, '');
+
+    const existing = await this.checkoutRepo.findOne({
+      where: { unitId, opportunityId: opp.id, status: CheckoutStatus.PENDING },
+      order: { createdAt: 'DESC' },
+    });
+    if (existing) {
+      if (opp.billingType === BillingType.PIX) {
+        return {
+          subscriptionId: existing.externalId,
+          paymentId: existing.payload?.paymentId || null,
+          pixPayload: existing.payload?.pixPayload || null,
+          pixEncodedImage: existing.payload?.pixEncodedImage || null,
+          pixExpirationDate: existing.payload?.pixExpirationDate || null,
+          invoiceUrl: existing.payload?.invoiceUrl || existing.url,
+        };
+      }
+      if (opp.billingType === BillingType.BOLETO) {
+        return { subscriptionId: existing.externalId, boletoUrl: existing.payload?.bankSlipUrl || existing.url };
+      }
+      if (existing.url) {
+        return { checkoutId: existing.externalId, checkoutLink: existing.url, expiresAt: existing.expiresAt };
+      }
+    }
+
+    if ([BillingType.BOLETO, BillingType.PIX].includes(opp.billingType as BillingType)) {
+      const billingType = opp.billingType as BillingType;
+      const external = await this.asaas.createSubscription(unitId, {
+        customer: customer.externalId,
+        billingType,
+        value,
+        nextDueDate,
+        cycle,
+        description: process.env.APP_NAME || 'Clube de Assinatura',
+        externalReference: opp.id,
+      });
+      const payments = await this.asaas.subscriptionPayments(unitId, external.id, 'PENDING', 1);
+      const first = payments.data?.[0];
+      if (!first?.id) {
+        throw new BadRequestException(
+          'O Asaas criou a assinatura, mas não retornou a primeira cobrança. Execute a reconciliação antes de tentar novamente.',
+        );
+      }
+      const local = await this.createPendingSubscription(opp, external.id);
+      const pix = billingType === BillingType.PIX ? await this.asaas.pixQrCode(unitId, first.id) : null;
+      const checkout = await this.checkoutRepo.save(this.checkoutRepo.create({
+        unitId,
+        opportunityId: opp.id,
+        billingCustomerId: customer.id,
+        provider: BillingProviderName.ASAAS,
+        externalId: external.id,
+        status: CheckoutStatus.PENDING,
+        url: first?.bankSlipUrl || first?.invoiceUrl || null,
+        expiresAt: pix?.expirationDate ? new Date(pix.expirationDate) : null,
+        payload: {
+          providerResourceType: 'SUBSCRIPTION',
+          billingType,
+          paymentId: first.id,
+          bankSlipUrl: first?.bankSlipUrl || null,
+          invoiceUrl: first?.invoiceUrl || null,
+          subscriptionId: local.id,
+          pixPayload: pix?.payload || null,
+          pixEncodedImage: pix?.encodedImage || null,
+          pixExpirationDate: pix?.expirationDate || null,
+        },
+      }));
+      opp.status = OpportunityStatus.CHECKOUT_PENDING;
+      opp.commercialStatus = CommercialStatus.CHECKOUT_SENT;
+      await this.repo.save(opp);
+      if (billingType === BillingType.PIX) {
+        return {
+          subscriptionId: external.id,
+          paymentId: first.id,
+          pixPayload: pix?.payload || null,
+          pixEncodedImage: pix?.encodedImage || null,
+          pixExpirationDate: pix?.expirationDate || null,
+          invoiceUrl: first?.invoiceUrl || null,
+        };
+      }
+      return { subscriptionId: external.id, boletoUrl: checkout.payload.bankSlipUrl || checkout.url };
+    }
+
+    const result = await this.asaas.createCheckout(unitId, {
+      billingTypes: [BillingType.CREDIT_CARD],
+      chargeTypes: ['RECURRENT'],
+      minutesToExpire: 1440,
+      externalReference: opp.id,
+      customerData: {
+        name: person.name,
+        cpfCnpj: String(person.taxId || '').replace(/\D/g, ''),
+        email: person.email || undefined,
+        phone: person.phone || undefined,
+        postalCode: String(person.postalCode || '').replace(/\D/g, '') || undefined,
+        address: person.address || undefined,
+        addressNumber: person.addressNumber || undefined,
+        complement: person.complement || undefined,
+        province: person.district || undefined,
+      },
+      items: [{ name: process.env.APP_NAME || 'Clube de Assinatura', quantity: 1, value }],
+      subscription: { cycle, nextDueDate },
+      callback: {
+        successUrl: `${callback}/dashboard/oportunidades`,
+        cancelUrl: `${callback}/dashboard/oportunidades`,
+        expiredUrl: `${callback}/dashboard/oportunidades`,
+      },
+    });
+    const checkout = await this.checkoutRepo.save(this.checkoutRepo.create({
+      unitId,
+      opportunityId: opp.id,
+      billingCustomerId: customer.id,
+      provider: BillingProviderName.ASAAS,
+      externalId: result.id,
+      status: CheckoutStatus.PENDING,
+      url: result.link,
+      expiresAt: new Date(Date.now() + 86_400_000),
+      payload: { providerResourceType: 'CHECKOUT', billingType: BillingType.CREDIT_CARD },
+    }));
+    opp.status = OpportunityStatus.CHECKOUT_PENDING;
+    opp.commercialStatus = CommercialStatus.CHECKOUT_SENT;
+    await this.repo.save(opp);
+    return { checkoutId: checkout.externalId, checkoutLink: checkout.url, expiresAt: checkout.expiresAt };
+  }
+
 
   async convert(unitId:string,opportunityId:string,input:{externalSubscriptionId?:string|null;correlationId?:string;source?:LifecycleSource;actorUserId?:string|null}){return this.dataSource.transaction(async manager=>{const opp=await manager.findOne(Opportunity,{where:{unitId,id:opportunityId},lock:{mode:'pessimistic_write'}});if(!opp)throw new NotFoundException('Oportunidade não encontrada.');let sub=await manager.findOne(Subscription,{where:{unitId,sourceOpportunityId:opp.id}});
     const contract=await manager.findOne(Contract,{where:{unitId,opportunityId:opp.id,status:ContractStatus.ACCEPTED},order:{version:'DESC'}});

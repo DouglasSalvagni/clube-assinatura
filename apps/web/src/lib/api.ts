@@ -4,6 +4,23 @@ interface ApiOptions extends RequestInit {
   tenantId?: string | null;
 }
 
+interface ApiErrorBody {
+  message?: string | string[];
+  error?: string;
+  requestId?: string | null;
+  providerStatus?: number | null;
+}
+
+function gatewayMessage(status: number) {
+  if (status === 504) return 'O servidor demorou demais para responder. Verifique a conexão externa e tente novamente.';
+  if (status === 502 || status === 503) return 'Um serviço externo está temporariamente indisponível. Tente novamente em instantes.';
+  return `A operação falhou com erro HTTP ${status}.`;
+}
+
+function isHtml(value: string) {
+  return /<!doctype html|<html[\s>]/i.test(value);
+}
+
 export async function api(path: string, options: ApiOptions = {}) {
   const { tenantId, ...fetchOptions } = options;
   const token = typeof window !== 'undefined' ? localStorage.getItem('accessToken') : null;
@@ -15,6 +32,7 @@ export async function api(path: string, options: ApiOptions = {}) {
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
+    Accept: 'application/json',
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
     ...((fetchOptions.headers as Record<string, string>) || {}),
   };
@@ -35,18 +53,29 @@ export async function api(path: string, options: ApiOptions = {}) {
 
   if (!res.ok) {
     const raw = await res.text();
-    let message = raw || `Erro HTTP ${res.status}`;
+    const contentType = res.headers.get('content-type') || '';
+    let message = gatewayMessage(res.status);
+    let requestId = res.headers.get('x-request-id') || res.headers.get('cf-ray');
 
-    try {
-      const parsed = JSON.parse(raw) as { message?: string | string[]; error?: string };
-      if (Array.isArray(parsed.message)) message = parsed.message.join('; ');
-      else if (typeof parsed.message === 'string') message = parsed.message;
-      else if (typeof parsed.error === 'string') message = parsed.error;
-    } catch {
-      // Mantém o corpo textual quando a resposta não é JSON.
+    if (contentType.includes('application/json') || (!isHtml(raw) && raw.trim().startsWith('{'))) {
+      try {
+        const parsed = JSON.parse(raw) as ApiErrorBody;
+        if (Array.isArray(parsed.message)) message = parsed.message.join('; ');
+        else if (typeof parsed.message === 'string') message = parsed.message;
+        else if (typeof parsed.error === 'string') message = parsed.error;
+        requestId = parsed.requestId || requestId;
+      } catch {
+        if (raw && !isHtml(raw)) message = raw.slice(0, 700);
+      }
+    } else if (raw && !isHtml(raw)) {
+      message = raw.slice(0, 700);
     }
 
+    if (requestId) message = `${message} Referência: ${requestId}.`;
     throw new Error(message);
   }
-  return res.json();
+
+  if (res.status === 204) return null;
+  const raw = await res.text();
+  return raw ? JSON.parse(raw) : null;
 }

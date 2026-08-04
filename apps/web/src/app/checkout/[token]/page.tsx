@@ -12,7 +12,13 @@ type CheckoutData = {
   pricing: any;
   allowedBillingTypes: BillingType[];
   participants: Array<{ id: string; name: string; taxId: string; relationship?: string }>;
-  contract?: { content: string; hash: string; status: string } | null;
+  contract?: {
+    content: string;
+    hash: string;
+    status: string;
+    relationType?: 'ORIGINAL' | 'AMENDMENT' | 'RENEWAL' | 'REPLACEMENT';
+    requiresPayment?: boolean;
+  } | null;
 };
 
 async function publicApi(path: string, init?: RequestInit) {

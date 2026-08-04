@@ -1,33 +1,78 @@
-# Prompt para IA local — validação completa
+Você tem acesso ao projeto local, ao banco e à infraestrutura já em execução no Docker Desktop. Não suba nem recrie os containers.
 
-Você tem acesso ao monorepo em execução, frontend na porta 4002, API na porta 4003 e à infraestrutura Docker/banco local.
+O frontend está em `http://localhost:4002` e a API em `http://localhost:4003` — confirme nas configurações caso estejam invertidos.
 
-Teste integralmente a feature descrita em `Plans/commercial-negotiation-checkout/PLAN.md` e `CHECKLIST.md`.
+Sua tarefa é validar integralmente a implementação descrita em:
 
-Antes dos testes:
+- `Plans/commercial-negotiation-checkout/PLAN.md`
+- `Plans/commercial-negotiation-checkout/CHECKLIST.md`
+- `Plans/commercial-negotiation-checkout/DEPLOYMENT.md`
 
-1. confirme que migrations estão aplicadas;
-2. execute `npm run seed:test-all`;
-3. confirme que `COMMERCIAL_V2_ENABLED_UNITS` permite `filial-centro`;
-4. valide no banco os usuários, memberships, equipe, ofertas, versões, políticas, funil, modelos contratuais e oportunidades criados pelos seeds.
+Considere também os ajustes recentes de:
 
-Execute testes pela interface e API, cobrindo:
+- usuários e vínculos por matriz/sede;
+- permissões e isolamento multiunidade;
+- seeds de usuários e da feature comercial;
+- integração Asaas individual por unidade;
+- teste de conexão, configuração e sincronização de webhook;
+- tratamento de erros e timeouts do Asaas;
+- checkout hospedado do Asaas;
+- contratos, pré-checkout, dependentes, aprovações e conversão;
+- aditivos, renovações e substituições contratuais.
 
-- isolamento entre matriz e sede e visibilidade por OWNER, ADMIN, MANAGER, SALES, FINANCE, SUPPORT e VIEWER;
+## Procedimento
+
+1. Leia o plano, o checklist, os seeds e o código implementado.
+2. Execute:
+   - `npm run typecheck`
+   - `npm run test -w @club-platform/api`
+3. Use os usuários e dados criados pelos seeds. Consulte os arquivos dos seeds para obter e-mails, senha, unidades, oportunidades e ofertas exatas.
+4. Teste pela interface, API e banco, conforme necessário.
+5. Não use produção do Asaas. Utilize apenas Sandbox.
+6. Não considere uma tarefa aprovada apenas porque o endpoint responde: valide efeitos no banco, permissões, estados, auditoria e isolamento entre sedes.
+7. Quando encontrar um problema claro, reproduza, identifique a causa, corrija o código e repita os testes afetados.
+8. Não apague dados ou resete o banco inteiro sem necessidade.
+
+## Cenários obrigatórios
+
+- negociador enxerga somente oportunidades próprias;
+- gerente enxerga o time;
+- administrador enxerga a sede;
+- superadministrador enxerga todas as sedes;
+- usuários de uma sede não acessam dados de outra;
 - Kanban, atribuição, transferência e movimentação de etapas;
-- negociação PF com dependentes e recálculo;
-- negociação PJ dentro da alçada e acima da alçada;
-- solicitação, aprovação e rejeição de exceções;
-- geração, expiração e revogação do pré-checkout;
-- confirmação cadastral, CEP, CPF/CNPJ, participantes, contrato, hash e aceite;
-- ofertas públicas PF/PJ e criação automática da oportunidade;
-- bloqueio do checkout legado com V2 ativa;
-- criação do checkout Asaas em sandbox, quando a conexão estiver configurada;
-- webhook e idempotência, sem criar venda/assinatura duplicada;
-- preservação do snapshot, política, contrato e participantes na conversão;
-- aditivo, renovação e substituição contratual;
-- permissões administrativas, métricas, logs e ausência de dados sensíveis.
+- negociação PF com preço fixo, dependentes e recálculo;
+- negociação PJ com vidas, preço unitário, desconto e aprovação;
+- bloqueio do checkout quando há aprovação pendente;
+- políticas por sede, perfil e usuário;
+- contratos versionados, snapshot JSONB, hash e aceite;
+- links públicos, expiração, revogação e proteção contra reutilização;
+- checkout genérico por oferta pública;
+- criação do checkout Asaas após o aceite;
+- formas de pagamento permitidas;
+- webhook idempotente e conversão sem duplicidade;
+- criação da venda, assinatura e participantes;
+- preservação de preço, contrato e política;
+- aditivo, renovação e substituição;
+- configuração Asaas distinta por unidade;
+- chave mascarada, teste de conexão e estado claro na interface;
+- criação, consulta, atualização e recuperação do webhook Asaas;
+- comportamento diante de chave inválida, timeout, HTML do Cloudflare e rate limit;
+- métricas, logs e ausência de dados sensíveis nos logs;
+- bloqueio do checkout legado quando a nova feature estiver ativa.
 
-Consulte o banco quando necessário para comprovar resultados. Não altere código inicialmente. Quando encontrar falha, reproduza, identifique a causa provável e proponha a correção.
+## Entrega
 
-Entregue um relatório em Markdown com: ambiente, comandos executados, cenários PASS/FAIL/BLOCKED, evidências (requisição/resposta, tela ou consulta SQL), bugs com severidade e localização provável, divergências do checklist e recomendação objetiva para liberação ou não da feature.
+Produza um relatório em `Plans/commercial-negotiation-checkout/TEST_REPORT.md` com:
+
+- resumo executivo;
+- ambiente e comandos executados;
+- resultado de cada item do checklist: `PASS`, `FAIL`, `PARCIAL` ou `NÃO TESTADO`;
+- evidências objetivas: rota, usuário, payload sanitizado, resposta, registros no banco e logs;
+- bugs encontrados, causa e impacto;
+- arquivos corrigidos;
+- testes executados após cada correção;
+- pendências que dependam de credenciais ou serviços externos;
+- conclusão sobre a segurança de ativar a feature em uma sede piloto.
+
+Ao final, apresente também uma lista curta dos arquivos modificados e eventuais migrations necessárias.

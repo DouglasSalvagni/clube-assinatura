@@ -114,7 +114,7 @@ describe('Fluxos comerciais HTTP (e2e)', () => {
       headers: { 'content-type': 'application/json', ...(init?.headers || {}) },
       ...init,
     });
-    const body = await response.json();
+    const body = await response.json() as any;
     return { status: response.status, body };
   }
 

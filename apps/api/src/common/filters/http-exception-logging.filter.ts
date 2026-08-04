@@ -37,11 +37,19 @@ export class HttpExceptionLoggingFilter extends BaseExceptionFilter {
         ? (response as { message?: unknown }).message
         : exception.message;
 
+    const responseDetails = response && typeof response === 'object'
+      ? response as Record<string, unknown>
+      : {};
     const context = JSON.stringify({
       method: request.method,
       path: request.originalUrl || request.url,
       status,
       message: responseMessage,
+      provider: responseDetails.provider || null,
+      providerStatus: responseDetails.providerStatus || null,
+      providerCode: responseDetails.providerCode || null,
+      requestId: responseDetails.requestId || null,
+      operation: responseDetails.operation || null,
       userId: request.user?.id || null,
       unitId: request.unitId
         || request.headers['x-unit-id']

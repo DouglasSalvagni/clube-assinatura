@@ -69,7 +69,8 @@ export class AcceptContractDto {
 }
 
 export class StartAsaasCheckoutDto {
-  @IsEnum(BillingType) billingType: BillingType;
+  @IsIn([BillingType.CREDIT_CARD, BillingType.PIX, BillingType.BOLETO])
+  billingType: BillingType;
 }
 
 

@@ -236,7 +236,10 @@ export class WebhooksService {
     await this.paymentRepo.save(payment);
 
     if (['PAYMENT_CONFIRMED','PAYMENT_RECEIVED'].includes(event.eventType)) {
-      if (p.externalReference) await this.opportunities.convertByExternalReference(event.unitId, p.externalReference, p.subscription || null, event.id);
+      if (p.externalReference) {
+        await this.opportunities.convertByExternalReference(event.unitId, p.externalReference, p.subscription || null, event.id);
+        await this.completeDirectSubscriptionCheckout(event.unitId, p.externalReference, p);
+      }
       if (sub && [SubscriptionStatus.PAST_DUE, SubscriptionStatus.SUSPENDED, SubscriptionStatus.PENDING_PAYMENT].includes(sub.status)) await this.subscriptions.transition(sub, SubscriptionStatus.ACTIVE, { source: LifecycleSource.WEBHOOK, reasonCode: 'PAYMENT_RECOVERED', correlationId: event.id });
     } else if (event.eventType === 'PAYMENT_OVERDUE' && sub?.status === SubscriptionStatus.ACTIVE) {
       await this.subscriptions.transition(sub, SubscriptionStatus.PAST_DUE, { source: LifecycleSource.WEBHOOK, reasonCode: 'PAYMENT_OVERDUE', correlationId: event.id });
@@ -261,6 +264,32 @@ export class WebhooksService {
       await this.lifecycle.record({ unitId: event.unitId, subscriptionId: sub.id, personId: sub.primaryPersonId, type: event.eventType.toLowerCase(), source: LifecycleSource.WEBHOOK, correlationId: event.id, metadata: { providerStatus: external.status } });
     }
     return true;
+  }
+
+  private async completeDirectSubscriptionCheckout(unitId: string, opportunityId: string, payment: any) {
+    const checkout = await this.checkoutRepo.findOne({
+      where: { unitId, opportunityId, status: CheckoutStatus.PENDING },
+      order: { createdAt: 'DESC' },
+    });
+    if (!checkout || checkout.payload?.providerResourceType !== 'SUBSCRIPTION') return;
+    if (checkout.externalId && payment.subscription && checkout.externalId !== payment.subscription) return;
+
+    checkout.status = CheckoutStatus.PAID;
+    checkout.url = checkout.url || payment.invoiceUrl || payment.bankSlipUrl || null;
+    checkout.payload = {
+      ...(checkout.payload || {}),
+      paymentId: payment.id || checkout.payload?.paymentId || null,
+      providerStatus: payment.status || null,
+    };
+    await this.checkoutRepo.save(checkout);
+
+    const precheckout = await this.precheckoutRepo.findOne({
+      where: { unitId, checkoutSessionId: checkout.id },
+    });
+    if (precheckout) {
+      precheckout.status = PrecheckoutStatus.COMPLETED;
+      await this.precheckoutRepo.save(precheckout);
+    }
   }
 
   private async resolveSubscription(unitId: string, payment: any): Promise<Subscription | null> {

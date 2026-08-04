@@ -102,9 +102,14 @@ export class BillingConnection extends UnitScopedEntity {
   @Column({ name: 'webhook_secret_encrypted', type: 'text', nullable: true }) webhookSecretEncrypted: string | null;
   @Column({ name: 'webhook_secret_hash', type: 'varchar', length: 128, nullable: true }) webhookSecretHash: string | null;
   @Column({ name: 'external_webhook_id', type: 'varchar', length: 120, nullable: true }) externalWebhookId: string | null;
+  @Column({ name: 'webhook_email', type: 'varchar', length: 255, nullable: true }) webhookEmail: string | null;
+  @Column({ name: 'webhook_url', type: 'text', nullable: true }) webhookUrl: string | null;
+  @Column({ name: 'remote_account_number', type: 'varchar', length: 120, nullable: true }) remoteAccountNumber: string | null;
   @Column({ type: 'boolean', default: false }) enabled: boolean;
   @Column({ name: 'last_validated_at', type: 'timestamptz', nullable: true }) lastValidatedAt: Date | null;
   @Column({ name: 'last_error', type: 'text', nullable: true }) lastError: string | null;
+  @Column({ name: 'last_webhook_sync_at', type: 'timestamptz', nullable: true }) lastWebhookSyncAt: Date | null;
+  @Column({ name: 'last_webhook_error', type: 'text', nullable: true }) lastWebhookError: string | null;
 }
 
 @Entity('people')

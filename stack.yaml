@@ -35,6 +35,7 @@ services:
       APP_NAME: ${APP_NAME:-ClubFlow}
       API_PORT: "4003"
       API_URL: ${API_URL}
+      PUBLIC_API_URL: ${PUBLIC_API_URL:-}
       DATABASE_URL: ${DATABASE_INTERNAL_URL:-postgresql://club:club@postgres:5432/club_platform}
       REDIS_URL: ${REDIS_INTERNAL_URL:-redis://redis:6379/0}
       JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
@@ -48,6 +49,8 @@ services:
       ASAAS_SANDBOX_URL: ${ASAAS_SANDBOX_URL:-https://api-sandbox.asaas.com/v3}
       ASAAS_MOCK: ${ASAAS_MOCK:-false}
       ASAAS_WEBHOOK_ALERT_EMAIL: ${ASAAS_WEBHOOK_ALERT_EMAIL:-}
+      ASAAS_REQUEST_TIMEOUT_MS: ${ASAAS_REQUEST_TIMEOUT_MS:-12000}
+      ASAAS_FORCE_IPV4: ${ASAAS_FORCE_IPV4:-false}
     networks: [club_network]
     deploy:
       replicas: 1

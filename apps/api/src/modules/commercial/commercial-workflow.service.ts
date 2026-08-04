@@ -708,9 +708,26 @@ export class CommercialWorkflowService {
     if (!contract.requiresPayment) throw new BadRequestException('Esta alteração contratual não exige novo pagamento.');
 
     if (session.checkoutSessionId) {
-      const existing = await this.checkoutSessions.findOne({ where: { id: session.checkoutSessionId, unitId: session.unitId } });
-      if (existing?.url && [CheckoutStatus.CREATED, CheckoutStatus.PENDING].includes(existing.status)) {
-        return { checkoutId: existing.id, checkoutLink: existing.url, expiresAt: existing.expiresAt };
+      const existing = await this.checkoutSessions.findOne({
+        where: { id: session.checkoutSessionId, unitId: session.unitId },
+      });
+      if (existing && [CheckoutStatus.CREATED, CheckoutStatus.PENDING].includes(existing.status)) {
+        if (existing.url) {
+          return { checkoutId: existing.id, checkoutLink: existing.url, expiresAt: existing.expiresAt };
+        }
+        if (existing.payload?.providerResourceType === 'SUBSCRIPTION' && existing.externalId) {
+          const response = await this.asaas.subscriptionPayments(session.unitId, existing.externalId, undefined, 10);
+          const payment = Array.isArray(response?.data) ? response.data[0] : null;
+          existing.url = payment?.invoiceUrl || payment?.bankSlipUrl || null;
+          existing.payload = { ...existing.payload, paymentId: payment?.id || null };
+          await this.checkoutSessions.save(existing);
+          if (existing.url) {
+            return { checkoutId: existing.id, checkoutLink: existing.url, expiresAt: existing.expiresAt };
+          }
+          throw new BadRequestException(
+            'O primeiro boleto ainda está sendo preparado pelo Asaas. Tente novamente em instantes.',
+          );
+        }
       }
     }
 
@@ -749,17 +766,37 @@ export class CommercialWorkflowService {
     if (!(value > 0)) throw new BadRequestException('Valor final inválido.');
 
     const appUrl = (process.env.APP_URL || 'http://localhost:4002').replace(/\/$/, '');
+    const cycle = session.pricingSnapshot?.cycle || opportunity.billingCycle || 'MONTHLY';
+    const nextDueDate = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
+
+    if (dto.billingType === BillingType.BOLETO) {
+      return this.startBoletoSubscription({
+        session, contract, opportunity, billingCustomer, value, cycle, nextDueDate,
+      });
+    }
+
     const result = await this.asaas.createCheckout(session.unitId, {
       billingTypes: [dto.billingType],
       chargeTypes: ['RECURRENT'],
       minutesToExpire: 1440,
       externalReference: opportunity.id,
-      customer: billingCustomer.externalId,
+      customerData: {
+        name: customerData.name,
+        cpfCnpj: String(customerData.taxId || '').replace(/\D/g, ''),
+        email: customerData.email || undefined,
+        phone: customerData.phone || undefined,
+        postalCode: String(customerData.postalCode || '').replace(/\D/g, '') || undefined,
+        address: customerData.address || undefined,
+        addressNumber: customerData.addressNumber || undefined,
+        complement: customerData.complement || undefined,
+        province: customerData.district || undefined,
+      },
       items: [{ name: process.env.APP_NAME || 'Clube de Assinatura', quantity: 1, value }],
-      subscription: { cycle: session.pricingSnapshot?.cycle || opportunity.billingCycle || 'MONTHLY', nextDueDate: new Date(Date.now() + 86400000).toISOString().slice(0, 10) },
+      subscription: { cycle, nextDueDate },
       callback: {
         successUrl: `${appUrl}/checkout/${token}?payment=success`,
         cancelUrl: `${appUrl}/checkout/${token}?payment=cancelled`,
+        expiredUrl: `${appUrl}/checkout/${token}?payment=expired`,
       },
     });
 
@@ -771,8 +808,13 @@ export class CommercialWorkflowService {
       externalId: result.id,
       status: CheckoutStatus.PENDING,
       url: result.link,
-      expiresAt: new Date(Date.now() + 86400000),
-      payload: { contractId: contract.id, precheckoutSessionId: session.id, billingType: dto.billingType },
+      expiresAt: new Date(Date.now() + 86_400_000),
+      payload: {
+        contractId: contract.id,
+        precheckoutSessionId: session.id,
+        billingType: dto.billingType,
+        providerResourceType: 'CHECKOUT',
+      },
     }));
     session.checkoutSessionId = checkout.id;
     session.status = PrecheckoutStatus.PAYMENT_PENDING;
@@ -785,6 +827,81 @@ export class CommercialWorkflowService {
       contractId: contract.id,
       externalId: checkout.externalId,
       billingType: dto.billingType,
+      amount: value,
+    });
+    return { checkoutId: checkout.id, checkoutLink: checkout.url, expiresAt: checkout.expiresAt };
+  }
+
+
+  private async startBoletoSubscription(input: {
+    session: PrecheckoutSession;
+    contract: Contract;
+    opportunity: Opportunity;
+    billingCustomer: BillingCustomer;
+    value: number;
+    cycle: string;
+    nextDueDate: string;
+  }) {
+    const { session, contract, opportunity, billingCustomer, value, cycle, nextDueDate } = input;
+    const subscription = await this.asaas.createSubscription(session.unitId, {
+      customer: billingCustomer.externalId,
+      billingType: BillingType.BOLETO,
+      value,
+      nextDueDate,
+      cycle,
+      description: process.env.APP_NAME || 'Clube de Assinatura',
+      externalReference: opportunity.id,
+    });
+
+    const checkout = await this.checkoutSessions.save(this.checkoutSessions.create({
+      unitId: session.unitId,
+      opportunityId: opportunity.id,
+      billingCustomerId: billingCustomer.id,
+      provider: BillingProviderName.ASAAS,
+      externalId: subscription.id,
+      status: CheckoutStatus.PENDING,
+      url: null,
+      expiresAt: null,
+      payload: {
+        contractId: contract.id,
+        precheckoutSessionId: session.id,
+        billingType: BillingType.BOLETO,
+        providerResourceType: 'SUBSCRIPTION',
+      },
+    }));
+
+    session.checkoutSessionId = checkout.id;
+    session.status = PrecheckoutStatus.PAYMENT_PENDING;
+    opportunity.status = OpportunityStatus.CHECKOUT_PENDING;
+    opportunity.commercialStatus = CommercialStatus.CHECKOUT_SENT;
+    await this.sessions.save(session);
+    await this.opportunities.save(opportunity);
+
+    try {
+      const response = await this.asaas.subscriptionPayments(session.unitId, subscription.id, undefined, 10);
+      const payment = Array.isArray(response?.data) ? response.data[0] : null;
+      checkout.url = payment?.invoiceUrl || payment?.bankSlipUrl || null;
+      checkout.payload = { ...checkout.payload, paymentId: payment?.id || null };
+      await this.checkoutSessions.save(checkout);
+    } catch (error) {
+      await this.audit(session.unitId, null, 'asaas.boleto_link_pending', 'checkout_session', checkout.id, null, {
+        opportunityId: opportunity.id,
+        externalSubscriptionId: subscription.id,
+      });
+      throw error;
+    }
+
+    if (!checkout.url) {
+      throw new BadRequestException(
+        'A assinatura foi criada no Asaas, mas o link do primeiro boleto ainda não está disponível. Tente novamente em instantes.',
+      );
+    }
+
+    await this.audit(session.unitId, null, 'asaas.subscription_created', 'checkout_session', checkout.id, null, {
+      opportunityId: opportunity.id,
+      contractId: contract.id,
+      externalSubscriptionId: subscription.id,
+      billingType: BillingType.BOLETO,
       amount: value,
     });
     return { checkoutId: checkout.id, checkoutLink: checkout.url, expiresAt: checkout.expiresAt };

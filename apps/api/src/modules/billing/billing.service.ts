@@ -1,5 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from 'crypto';
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import {
@@ -10,7 +10,7 @@ import {
   User,
 } from '../../database/entities';
 import { AuditService } from '../audit/audit.service';
-import { AsaasClient } from './asaas.client';
+import { AsaasApiException, AsaasClient } from './asaas.client';
 import { ConfigureBillingDto } from './billing.dto';
 import { EncryptionService } from './encryption.service';
 
@@ -31,6 +31,20 @@ export const ASAAS_WEBHOOK_EVENTS = [
   'CHECKOUT_PAID',
 ] as const;
 
+type WebhookAction = 'CREATED' | 'UPDATED' | 'UNCHANGED' | 'RECOVERED';
+
+interface RemoteWebhook {
+  id?: string;
+  name?: string;
+  url?: string;
+  email?: string;
+  enabled?: boolean;
+  interrupted?: boolean;
+  sendType?: string;
+  events?: string[];
+  hasAuthToken?: boolean;
+}
+
 @Injectable()
 export class BillingService {
   constructor(
@@ -48,16 +62,28 @@ export class BillingService {
       where: { unitId, provider: BillingProviderName.ASAAS },
     });
 
+    const configured = Boolean(connection?.apiKeyEncrypted);
+    const enabled = connection?.enabled || false;
+    const publicWebhookUrl = connection?.webhookUrl || await this.tryWebhookUrl(unitId);
+
     return {
-      configured: Boolean(connection?.apiKeyEncrypted),
-      enabled: connection?.enabled || false,
+      configured,
+      enabled,
+      state: this.connectionState(connection),
       environment: connection?.environment || BillingEnvironment.SANDBOX,
       provider: BillingProviderName.ASAAS,
-      apiKeyMasked: connection?.apiKeyEncrypted ? '••••••••••••' : null,
+      apiKeyMasked: this.maskedApiKey(connection),
+      apiKeyExpectedPrefix: this.expectedPrefix(connection?.environment || BillingEnvironment.SANDBOX),
+      remoteAccountNumber: connection?.remoteAccountNumber || null,
+      webhookEmail: connection?.webhookEmail || process.env.ASAAS_WEBHOOK_ALERT_EMAIL || '',
       webhookConfigured: Boolean(connection?.externalWebhookId),
+      webhookState: this.webhookState(connection),
       webhookId: connection?.externalWebhookId || null,
+      webhookUrl: publicWebhookUrl,
       lastValidatedAt: connection?.lastValidatedAt || null,
       lastError: connection?.lastError || null,
+      lastWebhookSyncAt: connection?.lastWebhookSyncAt || null,
+      lastWebhookError: connection?.lastWebhookError || null,
       events: ASAAS_WEBHOOK_EVENTS,
     };
   }
@@ -76,19 +102,53 @@ export class BillingService {
         webhookSecretEncrypted: null,
         webhookSecretHash: null,
         externalWebhookId: null,
+        webhookEmail: null,
+        webhookUrl: null,
+        remoteAccountNumber: null,
         enabled: false,
         lastValidatedAt: null,
         lastError: null,
+        lastWebhookSyncAt: null,
+        lastWebhookError: null,
       });
     }
 
     const before = this.sanitize(connection);
+    const environmentChanged = connection.environment !== dto.environment;
+    const apiKey = dto.apiKey?.trim();
+    const credentialChanged = Boolean(apiKey);
+
+    if (apiKey) this.validateKeyEnvironment(apiKey, dto.environment);
+    if (environmentChanged && connection.apiKeyEncrypted && !apiKey) {
+      throw new BadRequestException(
+        'Ao trocar o ambiente do Asaas, informe também a chave correspondente ao novo ambiente.',
+      );
+    }
+    if (dto.enabled === true && !apiKey && !connection.apiKeyEncrypted) {
+      throw new BadRequestException('Informe uma chave da API antes de habilitar a integração.');
+    }
+
+    // Uma nova credencial pode pertencer a outra conta, mesmo no mesmo ambiente.
+    // Limpar o vínculo remoto evita atualizar/excluir o webhook de uma conta anterior.
+    if (environmentChanged || credentialChanged) {
+      connection.externalWebhookId = null;
+      connection.webhookSecretEncrypted = null;
+      connection.webhookSecretHash = null;
+      connection.webhookUrl = null;
+      connection.lastWebhookSyncAt = null;
+      connection.lastWebhookError = null;
+      connection.lastValidatedAt = null;
+      connection.remoteAccountNumber = null;
+      connection.lastError = null;
+    }
+
     connection.environment = dto.environment;
-    if (dto.apiKey) connection.apiKeyEncrypted = this.encryption.encrypt(dto.apiKey.trim());
+    if (apiKey) connection.apiKeyEncrypted = this.encryption.encrypt(apiKey);
     if (dto.webhookSecret) {
       connection.webhookSecretEncrypted = this.encryption.encrypt(dto.webhookSecret);
       connection.webhookSecretHash = this.hash(dto.webhookSecret);
     }
+    if (dto.webhookEmail !== undefined) connection.webhookEmail = dto.webhookEmail.trim().toLowerCase();
     if (dto.enabled !== undefined) connection.enabled = dto.enabled;
 
     connection = await this.repository.save(connection);
@@ -105,106 +165,254 @@ export class BillingService {
   }
 
   async test(unitId: string) {
-    const connection = await this.repository.findOne({
-      where: { unitId, provider: BillingProviderName.ASAAS },
-    });
-    if (!connection) throw new NotFoundException('Conexão não configurada.');
+    const connection = await this.requireConnection(unitId);
 
     try {
-      await this.asaas.validate(unitId);
+      const account = await this.asaas.validate(unitId);
       connection.lastValidatedAt = new Date();
+      connection.remoteAccountNumber = this.accountNumber(account);
       connection.lastError = null;
       await this.repository.save(connection);
-      return { success: true, validatedAt: connection.lastValidatedAt };
+      return {
+        success: true,
+        state: 'CONNECTED',
+        environment: connection.environment,
+        accountNumber: connection.remoteAccountNumber,
+        validatedAt: connection.lastValidatedAt,
+      };
     } catch (error: any) {
-      connection.lastError = error.message;
+      connection.lastError = this.errorMessage(error);
       await this.repository.save(connection);
       throw error;
     }
   }
 
-  async setupWebhook(unitId: string) {
-    const unit = await this.unitRepository.findOne({ where: { id: unitId } });
+  async setupWebhook(unitId: string, actor: User) {
+    const unit = await this.unitRepository.findOne({ where: { id: unitId, active: true } });
     if (!unit) throw new NotFoundException('Unidade não encontrada.');
 
-    let connection = await this.repository.findOne({
-      where: { unitId, provider: BillingProviderName.ASAAS },
-    });
-    if (!connection?.apiKeyEncrypted && process.env.ASAAS_MOCK !== 'true') {
-      throw new NotFoundException('Configure a chave da API antes do webhook.');
-    }
-    if (!connection) {
-      connection = this.repository.create({
-        unitId,
-        provider: BillingProviderName.ASAAS,
-        environment: BillingEnvironment.SANDBOX,
-        apiKeyEncrypted: null,
-        webhookSecretEncrypted: null,
-        webhookSecretHash: null,
-        externalWebhookId: null,
-        enabled: true,
-        lastValidatedAt: null,
-        lastError: null,
-      });
+    let connection = await this.requireConnection(unitId);
+    if (!connection.enabled) {
+      throw new BadRequestException('Habilite e salve a integração antes de configurar o webhook.');
     }
 
-    const secret = randomBytes(32).toString('hex');
-    const baseUrl = (process.env.API_URL || 'http://localhost:4003').replace(/\/$/, '');
-    const url = `${baseUrl}/api/webhooks/asaas/${unit.slug}`;
-    const payload: Record<string, unknown> = {
-      name: `${process.env.APP_NAME || 'Gestão de Clubes'} - ${unit.name}`,
+    const email = connection.webhookEmail || process.env.ASAAS_WEBHOOK_ALERT_EMAIL;
+    if (!email) {
+      throw new BadRequestException('Informe o e-mail de alertas do webhook e salve a configuração.');
+    }
+
+    const url = this.webhookUrl(unit);
+    await this.test(unitId);
+    connection = await this.requireConnection(unitId);
+
+    const existingSecret = this.decryptOptional(connection.webhookSecretEncrypted);
+    const secret = existingSecret || randomBytes(32).toString('hex');
+    const payload = {
+      name: this.webhookName(unit),
       url,
-      events: ASAAS_WEBHOOK_EVENTS,
-      authToken: secret,
-      sendType: 'SEQUENTIALLY',
+      email,
       enabled: true,
       interrupted: false,
+      apiVersion: 3,
+      authToken: secret,
+      sendType: 'SEQUENTIALLY',
+      events: [...ASAAS_WEBHOOK_EVENTS],
     };
-    if (process.env.ASAAS_WEBHOOK_ALERT_EMAIL) payload.email = process.env.ASAAS_WEBHOOK_ALERT_EMAIL;
 
-    const webhook = connection.externalWebhookId
-      ? await this.asaas.updateWebhook(unitId, connection.externalWebhookId, payload)
-      : await this.asaas.createWebhook(unitId, payload);
+    let remote: RemoteWebhook | null = null;
+    let action: WebhookAction = 'CREATED';
 
-    connection.webhookSecretEncrypted = this.encryption.encrypt(secret);
-    connection.webhookSecretHash = this.hash(secret);
-    connection.externalWebhookId = webhook.id || connection.externalWebhookId;
-    connection.enabled = true;
-    connection.lastError = null;
-    await this.repository.save(connection);
+    try {
+      if (connection.externalWebhookId) {
+        remote = await this.getRemoteWebhookOrNull(unitId, connection.externalWebhookId);
+      }
 
-    return {
-      webhookId: connection.externalWebhookId,
-      url,
-      configured: true,
-      events: ASAAS_WEBHOOK_EVENTS,
-    };
+      if (!remote) {
+        const matched = await this.findRemoteWebhook(
+          unitId,
+          url,
+          payload.name,
+          connection.webhookUrl,
+        );
+        if (matched) {
+          remote = matched;
+          connection.externalWebhookId = matched.id || null;
+          action = 'RECOVERED';
+        }
+      }
+
+      if (remote?.id) {
+        if (existingSecret && !this.webhookChanged(remote, payload)) {
+          action = action === 'RECOVERED' ? 'RECOVERED' : 'UNCHANGED';
+        } else {
+          remote = await this.asaas.updateWebhook(unitId, remote.id, payload);
+          action = 'UPDATED';
+        }
+      } else {
+        remote = await this.asaas.createWebhook(unitId, payload);
+        action = 'CREATED';
+      }
+
+      if (!remote?.id) throw new BadRequestException('O Asaas não retornou o identificador do webhook.');
+
+      connection.webhookSecretEncrypted = this.encryption.encrypt(secret);
+      connection.webhookSecretHash = this.hash(secret);
+      connection.externalWebhookId = remote.id;
+      connection.webhookEmail = email;
+      connection.webhookUrl = url;
+      connection.enabled = true;
+      connection.lastWebhookSyncAt = new Date();
+      connection.lastWebhookError = null;
+      await this.repository.save(connection);
+
+      await this.audit.record({
+        unitId,
+        actorUserId: actor.id,
+        action: `billing.webhook.${action.toLowerCase()}`,
+        resourceType: 'billing_connection',
+        resourceId: connection.id,
+        beforeData: null,
+        afterData: {
+          webhookId: connection.externalWebhookId,
+          webhookUrl: url,
+          action,
+          events: ASAAS_WEBHOOK_EVENTS,
+        },
+      });
+
+      return {
+        success: true,
+        action,
+        webhookId: connection.externalWebhookId,
+        url,
+        email,
+        configured: true,
+        enabled: remote.enabled ?? true,
+        interrupted: remote.interrupted ?? false,
+        events: remote.events || ASAAS_WEBHOOK_EVENTS,
+        syncedAt: connection.lastWebhookSyncAt,
+      };
+    } catch (error: any) {
+      connection.lastWebhookError = this.errorMessage(error);
+      await this.repository.save(connection);
+      throw error;
+    }
   }
 
   async webhookStatus(unitId: string) {
     const connection = await this.repository.findOne({
       where: { unitId, provider: BillingProviderName.ASAAS },
     });
-    if (!connection?.externalWebhookId) return { webhookId: null, configured: false };
+    if (!connection?.externalWebhookId) {
+      return {
+        webhookId: null,
+        configured: false,
+        reachable: false,
+        url: connection?.webhookUrl || await this.tryWebhookUrl(unitId),
+        error: null,
+      };
+    }
 
     try {
-      return await this.asaas.getWebhook(unitId, connection.externalWebhookId);
-    } catch {
+      const remote = await this.asaas.getWebhook(unitId, connection.externalWebhookId) as RemoteWebhook;
+      connection.webhookUrl = remote.url || connection.webhookUrl;
+      connection.webhookEmail = remote.email || connection.webhookEmail;
+      connection.lastWebhookSyncAt = new Date();
+      connection.lastWebhookError = null;
+      await this.repository.save(connection);
       return {
         webhookId: connection.externalWebhookId,
         configured: true,
-        error: 'Não foi possível consultar o status no Asaas.',
+        reachable: true,
+        name: remote.name || null,
+        url: remote.url || connection.webhookUrl,
+        email: remote.email || connection.webhookEmail,
+        enabled: remote.enabled ?? null,
+        interrupted: remote.interrupted ?? null,
+        sendType: remote.sendType || null,
+        hasAuthToken: remote.hasAuthToken ?? Boolean(connection.webhookSecretHash),
+        events: remote.events || [],
+        syncedAt: connection.lastWebhookSyncAt,
+        error: null,
+      };
+    } catch (error: any) {
+      const missing = error instanceof AsaasApiException && error.providerStatus === 404;
+      connection.lastWebhookSyncAt = new Date();
+      connection.lastWebhookError = this.errorMessage(error);
+      if (missing) connection.externalWebhookId = null;
+      await this.repository.save(connection);
+      return {
+        webhookId: missing ? null : connection.externalWebhookId,
+        configured: !missing,
+        reachable: false,
+        url: connection.webhookUrl,
+        error: missing
+          ? 'O webhook salvo não existe mais no Asaas. Use “Configurar webhook” para recriá-lo.'
+          : connection.lastWebhookError,
       };
     }
   }
 
-  async removeBackoff(unitId: string) {
+  async removeWebhook(unitId: string, actor: User) {
     const connection = await this.repository.findOne({
       where: { unitId, provider: BillingProviderName.ASAAS },
     });
     if (!connection?.externalWebhookId) throw new NotFoundException('Webhook não configurado.');
-    await this.asaas.removeWebhookBackoff(unitId, connection.externalWebhookId);
+
+    const webhookId = connection.externalWebhookId;
+    try {
+      await this.asaas.deleteWebhook(unitId, webhookId);
+    } catch (error: any) {
+      if (!(error instanceof AsaasApiException && error.providerStatus === 404)) throw error;
+    }
+
+    connection.externalWebhookId = null;
+    connection.webhookSecretEncrypted = null;
+    connection.webhookSecretHash = null;
+    connection.webhookUrl = null;
+    connection.lastWebhookSyncAt = new Date();
+    connection.lastWebhookError = null;
+    await this.repository.save(connection);
+
+    await this.audit.record({
+      unitId,
+      actorUserId: actor.id,
+      action: 'billing.webhook.removed',
+      resourceType: 'billing_connection',
+      resourceId: connection.id,
+      beforeData: { webhookId },
+      afterData: { webhookId: null },
+    });
+
     return { success: true };
+  }
+
+  async removeBackoff(unitId: string, actor: User) {
+    const connection = await this.repository.findOne({
+      where: { unitId, provider: BillingProviderName.ASAAS },
+    });
+    if (!connection?.externalWebhookId) throw new NotFoundException('Webhook não configurado.');
+
+    try {
+      await this.asaas.removeWebhookBackoff(unitId, connection.externalWebhookId);
+      connection.lastWebhookSyncAt = new Date();
+      connection.lastWebhookError = null;
+      await this.repository.save(connection);
+      await this.audit.record({
+        unitId,
+        actorUserId: actor.id,
+        action: 'billing.webhook.backoff_removed',
+        resourceType: 'billing_connection',
+        resourceId: connection.id,
+        beforeData: null,
+        afterData: { webhookId: connection.externalWebhookId },
+      });
+      return { success: true };
+    } catch (error: any) {
+      connection.lastWebhookError = this.errorMessage(error);
+      await this.repository.save(connection);
+      throw error;
+    }
   }
 
   async verifyWebhookSecret(unitId: string, provided: string | undefined) {
@@ -225,6 +433,161 @@ export class BillingService {
     });
   }
 
+  private async requireConnection(unitId: string) {
+    const connection = await this.repository.findOne({
+      where: { unitId, provider: BillingProviderName.ASAAS },
+    });
+    if (!connection?.apiKeyEncrypted) throw new NotFoundException('Conexão Asaas não configurada.');
+    return connection;
+  }
+
+  private async getRemoteWebhookOrNull(unitId: string, id: string): Promise<RemoteWebhook | null> {
+    try {
+      return await this.asaas.getWebhook(unitId, id);
+    } catch (error) {
+      if (error instanceof AsaasApiException && error.providerStatus === 404) return null;
+      throw error;
+    }
+  }
+
+  private async findRemoteWebhook(
+    unitId: string,
+    url: string,
+    name: string,
+    previousUrl?: string | null,
+  ): Promise<RemoteWebhook | null> {
+    const response = await this.asaas.listWebhooks(unitId, 100, 0);
+    const webhooks: RemoteWebhook[] = Array.isArray(response?.data) ? response.data : [];
+    return webhooks.find((item) => item.url === url)
+      || (previousUrl ? webhooks.find((item) => item.url === previousUrl) : null)
+      || webhooks.find((item) => item.name === name)
+      || null;
+  }
+
+  private webhookChanged(remote: RemoteWebhook, expected: Record<string, any>) {
+    const remoteEvents = [...(remote.events || [])].sort();
+    const expectedEvents = [...expected.events].sort();
+    return remote.name !== expected.name
+      || remote.url !== expected.url
+      || remote.email !== expected.email
+      || remote.enabled !== true
+      || remote.interrupted !== false
+      || remote.sendType !== expected.sendType
+      || remote.hasAuthToken === false
+      || JSON.stringify(remoteEvents) !== JSON.stringify(expectedEvents);
+  }
+
+  private webhookName(unit: Unit) {
+    return `${process.env.APP_NAME || 'Gestão de Clubes'} - ${unit.name} [${unit.slug}]`.slice(0, 180);
+  }
+
+  private webhookUrl(unit: Unit) {
+    const raw = process.env.PUBLIC_API_URL || process.env.API_URL || process.env.APP_URL;
+    if (!raw) {
+      throw new BadRequestException('Configure PUBLIC_API_URL com a URL pública HTTPS da aplicação.');
+    }
+
+    let target: URL;
+    try {
+      target = new URL(raw);
+    } catch {
+      throw new BadRequestException('PUBLIC_API_URL/API_URL não contém uma URL válida.');
+    }
+
+    const isLocal = ['localhost', '127.0.0.1', 'host.docker.internal'].includes(target.hostname);
+    if (process.env.ASAAS_MOCK !== 'true' && !isLocal && target.protocol !== 'https:') {
+      throw new BadRequestException('A URL pública do webhook deve utilizar HTTPS.');
+    }
+    if (process.env.ASAAS_MOCK !== 'true' && isLocal) {
+      throw new BadRequestException(
+        'O Asaas não consegue acessar localhost. Configure PUBLIC_API_URL com o domínio público da aplicação.',
+      );
+    }
+
+    const currentPath = target.pathname.replace(/\/+$/, '');
+    const apiPath = currentPath.endsWith('/api') ? currentPath : `${currentPath}/api`;
+    target.pathname = `${apiPath}/webhooks/asaas/${encodeURIComponent(unit.slug)}`.replace(/\/+/g, '/');
+    target.search = '';
+    target.hash = '';
+    return target.toString().replace(/\/$/, '');
+  }
+
+  private async tryWebhookUrl(unitId: string) {
+    const unit = await this.unitRepository.findOne({ where: { id: unitId } });
+    if (!unit) return null;
+    try {
+      return this.webhookUrl(unit);
+    } catch {
+      return null;
+    }
+  }
+
+  private validateKeyEnvironment(apiKey: string, environment: BillingEnvironment) {
+    if (apiKey.startsWith('$aact_hmlg_') && environment !== BillingEnvironment.SANDBOX) {
+      throw new BadRequestException('A chave informada é de Sandbox, mas o ambiente selecionado é Produção.');
+    }
+    if (apiKey.startsWith('$aact_prod_') && environment !== BillingEnvironment.PRODUCTION) {
+      throw new BadRequestException('A chave informada é de Produção, mas o ambiente selecionado é Sandbox.');
+    }
+  }
+
+  private expectedPrefix(environment: BillingEnvironment) {
+    return environment === BillingEnvironment.PRODUCTION ? '$aact_prod_' : '$aact_hmlg_';
+  }
+
+  private maskedApiKey(connection: BillingConnection | null) {
+    if (!connection?.apiKeyEncrypted) return null;
+    try {
+      const apiKey = this.encryption.decrypt(connection.apiKeyEncrypted);
+      return `••••••••${apiKey.slice(-4)}`;
+    } catch {
+      return '••••••••';
+    }
+  }
+
+  private decryptOptional(encrypted: string | null) {
+    if (!encrypted) return null;
+    try {
+      return this.encryption.decrypt(encrypted);
+    } catch {
+      return null;
+    }
+  }
+
+  private accountNumber(account: any) {
+    if (!account) return null;
+    if (typeof account.accountNumber === 'string') return account.accountNumber;
+    if (typeof account.account === 'string') {
+      const agency = account.agency ? `${account.agency} / ` : '';
+      return `${agency}${account.account}`;
+    }
+    if (account.accountNumber && typeof account.accountNumber === 'object') {
+      return JSON.stringify(account.accountNumber).slice(0, 120);
+    }
+    return null;
+  }
+
+  private connectionState(connection: BillingConnection | null) {
+    if (!connection?.apiKeyEncrypted) return 'NOT_CONFIGURED';
+    if (!connection.enabled) return 'DISABLED';
+    if (connection.lastError) return 'ERROR';
+    if (connection.lastValidatedAt) return 'CONNECTED';
+    return 'NOT_VALIDATED';
+  }
+
+  private webhookState(connection: BillingConnection | null) {
+    if (!connection?.externalWebhookId) return 'NOT_CONFIGURED';
+    if (connection.lastWebhookError) return 'ERROR';
+    if (connection.lastWebhookSyncAt) return 'CONNECTED';
+    return 'NOT_VALIDATED';
+  }
+
+  private errorMessage(error: any) {
+    const response = error?.getResponse?.();
+    const message = typeof response === 'object' && response !== null ? response.message : error?.message;
+    return String(Array.isArray(message) ? message.join('; ') : message || 'Erro não informado').slice(0, 2000);
+  }
+
   private hash(value: string) {
     return createHash('sha256').update(value).digest('hex');
   }
@@ -236,9 +599,15 @@ export class BillingService {
       provider: connection.provider,
       environment: connection.environment,
       enabled: connection.enabled,
+      apiKeyConfigured: Boolean(connection.apiKeyEncrypted),
+      webhookEmail: connection.webhookEmail,
+      webhookUrl: connection.webhookUrl,
       externalWebhookId: connection.externalWebhookId,
+      remoteAccountNumber: connection.remoteAccountNumber,
       lastValidatedAt: connection.lastValidatedAt,
       lastError: connection.lastError,
+      lastWebhookSyncAt: connection.lastWebhookSyncAt,
+      lastWebhookError: connection.lastWebhookError,
     };
   }
 }
