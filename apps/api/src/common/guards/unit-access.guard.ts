@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, In } from 'typeorm';
+import { isUUID } from 'class-validator';
 import { GlobalRole, Membership, Unit } from '../../database/entities';
 import { AuthenticatedRequest } from '../types/request-context';
 
@@ -50,32 +51,31 @@ export class UnitAccessGuard implements CanActivate {
         .map((value) => value.trim())
         .filter(Boolean);
 
+      const ids = refs.filter((value) => isUUID(value));
+      const slugs = refs.filter((value) => !isUUID(value));
       const units = await unitRepo.find({
         where: [
-          { id: In(refs), active: true },
-          { slug: In(refs), active: true },
+          ...(ids.length ? [{ id: In(ids), active: true }] : []),
+          ...(slugs.length ? [{ slug: In(slugs), active: true }] : []),
         ],
       });
 
-      const ids = [...new Set(units.map((unit) => unit.id))];
+      const resolvedIds = [...new Set(units.map((unit) => unit.id))];
 
-      if (ids.length !== refs.length) {
+      if (resolvedIds.length !== refs.length) {
         throw new BadRequestException(
           'Uma ou mais unidades não foram encontradas.',
         );
       }
 
-      request.unitIds = ids;
-      request.unitId = ids.length === 1 ? ids[0] : undefined;
+      request.unitIds = resolvedIds;
+      request.unitId = resolvedIds.length === 1 ? resolvedIds[0] : undefined;
       return true;
     }
 
-    const unit = await unitRepo.findOne({
-      where: [
-        { id: raw, active: true },
-        { slug: raw, active: true },
-      ],
-    });
+    const unit = isUUID(raw)
+      ? await unitRepo.findOne({ where: { id: raw, active: true } })
+      : await unitRepo.findOne({ where: { slug: raw, active: true } });
 
     if (!unit) {
       throw new BadRequestException(

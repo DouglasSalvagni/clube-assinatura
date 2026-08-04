@@ -121,7 +121,8 @@ async function run() {
       maxDiscountPercent: maxPercent,
       maxDiscountAmount: maxAmount,
       minUnitPrice: minPrice,
-      allowedBillingTypes: [BillingType.CREDIT_CARD, BillingType.BOLETO, BillingType.PIX],
+      allowedBillingTypes: [BillingType.CREDIT_CARD, BillingType.BOLETO],
+      pricingRules: { allowMonthlyBoleto: true },
       active: true,
       rules: { seeded: true, requireApprovalAboveLimit: true },
     };

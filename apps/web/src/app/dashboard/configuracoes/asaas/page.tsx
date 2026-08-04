@@ -1,6 +1,6 @@
 'use client';
 
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '@/lib/api';
 import { usePageTitle } from '@/lib/page-title-context';
 
@@ -84,6 +84,13 @@ export default function AsaasSettingsPage() {
   const [apiKey, setApiKey] = useState('');
   const [webhookEmail, setWebhookEmail] = useState('');
   const [enabled, setEnabled] = useState(false);
+  const [webhookName, setWebhookName] = useState('');
+  const [webhookEnabled, setWebhookEnabled] = useState(true);
+  const [webhookSendType, setWebhookSendType] = useState<'SEQUENTIALLY' | 'NON_SEQUENTIALLY'>('SEQUENTIALLY');
+  const [webhookEvents, setWebhookEvents] = useState<string[]>([]);
+  const [webhookToken, setWebhookToken] = useState('');
+  const [showWebhookToken, setShowWebhookToken] = useState(false);
+  const tokenHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [busy, setBusy] = useState('');
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
@@ -103,11 +110,19 @@ export default function AsaasSettingsPage() {
     if (loadRemote && data.webhookConfigured) {
       const webhook = await api('/billing/asaas/webhook') as RemoteWebhookStatus;
       setRemoteWebhook(webhook);
+      setWebhookName(webhook.name || '');
+      setWebhookEnabled(webhook.enabled !== false);
+      setWebhookSendType(webhook.sendType === 'NON_SEQUENTIALLY' ? 'NON_SEQUENTIALLY' : 'SEQUENTIALLY');
+      setWebhookEvents(webhook.events || data.events || []);
     } else if (!data.webhookConfigured) {
       setRemoteWebhook(null);
     }
     return data;
   }
+
+  useEffect(() => () => {
+    if (tokenHideTimer.current) clearTimeout(tokenHideTimer.current);
+  }, []);
 
   useEffect(() => {
     setPageTitle('Integração Asaas');
@@ -115,7 +130,14 @@ export default function AsaasSettingsPage() {
       .then((data) => {
         if (!data.webhookConfigured) return;
         api('/billing/asaas/webhook')
-          .then((webhook) => setRemoteWebhook(webhook as RemoteWebhookStatus))
+          .then((webhook) => {
+            const value = webhook as RemoteWebhookStatus;
+            setRemoteWebhook(value);
+            setWebhookName(value.name || '');
+            setWebhookEnabled(value.enabled !== false);
+            setWebhookSendType(value.sendType === 'NON_SEQUENTIALLY' ? 'NON_SEQUENTIALLY' : 'SEQUENTIALLY');
+            setWebhookEvents(value.events || data.events || []);
+          })
           .catch((remoteError) => setRemoteWebhook({
             configured: true,
             reachable: false,
@@ -173,8 +195,88 @@ export default function AsaasSettingsPage() {
     );
   }
 
+  async function configureWebhook() {
+    if (!webhookEmail.trim()) {
+      setError('Informe um e-mail para alertas do webhook.');
+      return;
+    }
+    await run(
+      'webhook',
+      async () => {
+        if (webhookEmail.trim() !== (status?.webhookEmail || '')) {
+          await api('/billing/asaas', {
+            method: 'PUT',
+            body: JSON.stringify({ environment, enabled, webhookEmail: webhookEmail.trim() }),
+          });
+        }
+        await api('/billing/asaas/webhook/setup', {
+          method: 'POST',
+          body: JSON.stringify({ email: webhookEmail.trim() }),
+        });
+      },
+      status?.webhookConfigured
+        ? 'Webhook verificado e sincronizado com o Asaas.'
+        : 'Webhook criado e vinculado com sucesso.',
+    );
+  }
+
+  async function saveWebhookChanges() {
+    if (!webhookEmail.trim()) {
+      setError('Informe um e-mail válido para o webhook.');
+      return;
+    }
+    await run(
+      'save-webhook',
+      () => api('/billing/asaas/webhook', {
+        method: 'PUT',
+        body: JSON.stringify({
+          name: webhookName.trim() || undefined,
+          email: webhookEmail.trim(),
+          enabled: webhookEnabled,
+          sendType: webhookSendType,
+          events: webhookEvents,
+        }),
+      }),
+      'Webhook atualizado no Asaas.',
+    );
+  }
+
+  async function toggleWebhookToken() {
+    if (showWebhookToken) {
+      setShowWebhookToken(false);
+      setWebhookToken('');
+      if (tokenHideTimer.current) clearTimeout(tokenHideTimer.current);
+      tokenHideTimer.current = null;
+      return;
+    }
+
+    setBusy('reveal-token');
+    setError('');
+    try {
+      const result = await api('/billing/asaas/webhook/token/reveal', {
+        method: 'POST',
+      }) as { token: string };
+      setWebhookToken(result.token);
+      setShowWebhookToken(true);
+      if (tokenHideTimer.current) clearTimeout(tokenHideTimer.current);
+      tokenHideTimer.current = setTimeout(() => {
+        setShowWebhookToken(false);
+        setWebhookToken('');
+        tokenHideTimer.current = null;
+      }, 30_000);
+    } catch (tokenError) {
+      setError(tokenError instanceof Error
+        ? tokenError.message
+        : 'Não foi possível revelar o token do webhook.');
+    } finally {
+      setBusy('');
+    }
+  }
+
   async function removeWebhook() {
     if (!window.confirm('Remover este webhook da conta Asaas? Os eventos deixarão de ser enviados até uma nova configuração.')) return;
+    setShowWebhookToken(false);
+    setWebhookToken('');
     await run(
       'remove-webhook',
       () => api('/billing/asaas/webhook', { method: 'DELETE' }),
@@ -323,14 +425,8 @@ export default function AsaasSettingsPage() {
           </button>
           <button
             type="button"
-            disabled={Boolean(busy) || !status?.configured || !status.enabled || !webhookEmail.trim()}
-            onClick={() => run(
-              'webhook',
-              () => api('/billing/asaas/webhook/setup', { method: 'POST' }),
-              status?.webhookConfigured
-                ? 'Webhook verificado e sincronizado com o Asaas.'
-                : 'Webhook criado e vinculado com sucesso.',
-            )}
+            disabled={Boolean(busy) || !status?.configured || !status.enabled || status.state !== 'CONNECTED'}
+            onClick={configureWebhook}
             className="rounded-lg border border-edge bg-surface px-4 py-2.5 text-sm font-medium text-ink-secondary hover:bg-surface-canvas disabled:opacity-50"
           >
             {busy === 'webhook'
@@ -358,7 +454,104 @@ export default function AsaasSettingsPage() {
             </button>
           )}
         </div>
+        {status?.configured && status.state !== 'CONNECTED' && (
+          <p className="text-xs text-warning">Teste a conexão com sucesso antes de criar ou sincronizar o webhook.</p>
+        )}
+        {status?.configured && status.state === 'CONNECTED' && !webhookEmail.trim() && (
+          <p className="text-xs text-warning">Informe o e-mail de alertas. Ele será salvo automaticamente ao configurar o webhook.</p>
+        )}
       </form>
+
+      {status?.webhookConfigured && (
+        <div className="max-w-5xl space-y-4 rounded-xl border border-edge bg-surface-elevated p-6 shadow-sm">
+          <div>
+            <h3 className="font-semibold text-ink">Editar webhook</h3>
+            <p className="mt-1 text-sm text-ink-tertiary">Edite nome, envio, estado e eventos diretamente na conta Asaas desta unidade.</p>
+          </div>
+          <div className="grid gap-4 md:grid-cols-2">
+            <div>
+              <label className="mb-1.5 block text-sm font-medium text-ink-secondary">Nome</label>
+              <input value={webhookName} onChange={(event) => setWebhookName(event.target.value)} className="w-full rounded-lg border border-edge bg-surface-input px-3 py-2.5 text-sm text-ink" />
+            </div>
+            <div>
+              <label className="mb-1.5 block text-sm font-medium text-ink-secondary">Ordem de envio</label>
+              <select value={webhookSendType} onChange={(event) => setWebhookSendType(event.target.value as any)} className="w-full rounded-lg border border-edge bg-surface-input px-3 py-2.5 text-sm text-ink">
+                <option value="SEQUENTIALLY">Sequencial</option>
+                <option value="NON_SEQUENTIALLY">Não sequencial</option>
+              </select>
+            </div>
+          </div>
+          <div>
+            <label className="mb-1.5 block text-sm font-medium text-ink-secondary">
+              Token de autenticação do webhook
+            </label>
+            <div className="relative">
+              <input
+                type={showWebhookToken ? 'text' : 'password'}
+                value={showWebhookToken ? webhookToken : '••••••••••••••••••••••••••••••••'}
+                readOnly
+                autoComplete="off"
+                aria-label="Token de autenticação do webhook"
+                className="w-full rounded-lg border border-edge bg-surface-input px-3 py-2.5 pr-11 font-mono text-sm text-ink"
+              />
+              <button
+                type="button"
+                onClick={toggleWebhookToken}
+                disabled={Boolean(busy)}
+                aria-label={showWebhookToken ? 'Ocultar token' : 'Revelar token'}
+                title={showWebhookToken ? 'Ocultar token' : 'Revelar token'}
+                className="absolute inset-y-0 right-0 flex w-11 items-center justify-center text-ink-tertiary hover:text-ink disabled:opacity-50"
+              >
+                {busy === 'reveal-token' ? (
+                  <span className="text-xs">...</span>
+                ) : showWebhookToken ? (
+                  <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+                    <path d="M3 3l18 18" />
+                    <path d="M10.6 10.7a2 2 0 002.7 2.7" />
+                    <path d="M9.9 4.3A10.8 10.8 0 0112 4c5.2 0 9 4.6 9 8a7.7 7.7 0 01-2 4.4M6.6 6.7C4.4 8.2 3 10.4 3 12c0 3.4 3.8 8 9 8 1 0 2-.2 2.9-.5" />
+                  </svg>
+                ) : (
+                  <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+                    <path d="M3 12s3.5-8 9-8 9 8 9 8-3.5 8-9 8-9-8-9-8z" />
+                    <circle cx="12" cy="12" r="2.5" />
+                  </svg>
+                )}
+              </button>
+            </div>
+            <p className="mt-1.5 text-xs text-ink-muted">
+              O token é revelado somente sob solicitação e volta a ser ocultado após 30 segundos.
+            </p>
+          </div>
+          <label className="flex items-center gap-3 text-sm text-ink-secondary">
+            <input type="checkbox" checked={webhookEnabled} onChange={(event) => setWebhookEnabled(event.target.checked)} className="h-4 w-4 accent-brand" />
+            Webhook habilitado no Asaas
+          </label>
+          <div>
+            <p className="text-sm font-medium text-ink-secondary">Eventos</p>
+            <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+              {(status.events || []).map((eventName) => (
+                <label key={eventName} className="flex items-start gap-2 rounded-lg border border-edge bg-surface-canvas p-2 text-xs text-ink-tertiary">
+                  <input
+                    type="checkbox"
+                    checked={webhookEvents.includes(eventName)}
+                    onChange={(event) => setWebhookEvents((current) => event.target.checked ? [...new Set([...current, eventName])] : current.filter((item) => item !== eventName))}
+                    className="mt-0.5 h-4 w-4 accent-brand"
+                  />
+                  <span className="break-all">{eventName}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-3">
+            <button type="button" disabled={Boolean(busy) || !webhookEvents.length} onClick={saveWebhookChanges} className="rounded-lg bg-brand px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50">
+              {busy === 'save-webhook' ? 'Salvando...' : 'Salvar alterações do webhook'}
+            </button>
+            <button type="button" disabled={Boolean(busy)} onClick={removeWebhook} className="rounded-lg border border-danger/30 bg-danger/5 px-4 py-2.5 text-sm font-medium text-danger hover:bg-danger/10 disabled:opacity-50">
+              {busy === 'remove-webhook' ? 'Revogando...' : 'Revogar webhook'}
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="max-w-5xl rounded-xl border border-edge bg-surface-elevated p-6 shadow-sm">
         <div className="flex flex-wrap items-start justify-between gap-3">

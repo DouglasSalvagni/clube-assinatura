@@ -18,7 +18,7 @@ import { PermissionsGuard } from '../../common/guards/permissions.guard';
 import { UnitAccessGuard } from '../../common/guards/unit-access.guard';
 import { PERMISSIONS } from '../../common/utils/permissions';
 import { GlobalRole, User } from '../../database/entities';
-import { ConfigureBillingDto } from './billing.dto';
+import { ConfigureAsaasWebhookDto, ConfigureBillingDto } from './billing.dto';
 import { BillingService } from './billing.service';
 
 @ApiTags('Asaas por unidade')
@@ -52,8 +52,31 @@ export class BillingController {
 
   @Post('webhook/setup')
   @RequirePermissions(PERMISSIONS.BILLING_MANAGE)
-  setupWebhook(@CurrentUnitId() unitId: string, @CurrentUser() actor: User) {
-    return this.service.setupWebhook(unitId, actor);
+  setupWebhook(
+    @CurrentUnitId() unitId: string,
+    @CurrentUser() actor: User,
+    @Body() dto: ConfigureAsaasWebhookDto,
+  ) {
+    return this.service.setupWebhook(unitId, actor, dto);
+  }
+
+  @Put('webhook')
+  @RequirePermissions(PERMISSIONS.BILLING_MANAGE)
+  updateWebhook(
+    @CurrentUnitId() unitId: string,
+    @CurrentUser() actor: User,
+    @Body() dto: ConfigureAsaasWebhookDto,
+  ) {
+    return this.service.updateWebhook(unitId, actor, dto);
+  }
+
+  @Post('webhook/token/reveal')
+  @RequirePermissions(PERMISSIONS.BILLING_MANAGE)
+  revealWebhookToken(
+    @CurrentUnitId() unitId: string,
+    @CurrentUser() actor: User,
+  ) {
+    return this.service.revealWebhookSecret(unitId, actor);
   }
 
   @Get('webhook')

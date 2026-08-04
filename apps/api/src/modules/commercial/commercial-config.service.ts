@@ -2,6 +2,7 @@ import { BadRequestException, ConflictException, Injectable, NotFoundException }
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import {
+  BillingCycle,
   BillingType,
   CommercialOffer,
   CommercialOfferStatus,
@@ -262,7 +263,7 @@ export class CommercialConfigService {
       description: offer.description,
       customerType: offer.customerType,
       publicSlug: offer.publicSlug,
-      version: this.publicVersion(version),
+      version: this.publicVersion(offer, version),
       simulation: this.simulateVersion(offer, version, {}),
     };
   }
@@ -334,7 +335,7 @@ export class CommercialConfigService {
       negotiationSnapshot: {
         ...calculation,
         offer: { id: offer.id, code: offer.code, name: offer.name, version: version.version },
-        allowedBillingTypes: version.allowedBillingTypes,
+        allowedBillingTypes: this.allowedBillingTypes(offer.customerType, version.billingCycle, version.allowedBillingTypes, version.pricingRules),
         limits: { maxDependents: version.maxDependents, minLives: version.minLives, maxLives: version.maxLives },
         source: 'PUBLIC_OFFER',
       },
@@ -342,7 +343,7 @@ export class CommercialConfigService {
       status: OpportunityStatus.OPEN,
       expectedValue: Number(calculation.pricing.finalAmount).toFixed(2),
       billingCycle: version.billingCycle,
-      billingType: version.allowedBillingTypes[0] || BillingType.CREDIT_CARD,
+      billingType: this.allowedBillingTypes(offer.customerType, version.billingCycle, version.allowedBillingTypes, version.pricingRules)[0] || BillingType.CREDIT_CARD,
       acquisitionSource: `PUBLIC_OFFER:${offer.code}`,
       notes: null,
       lossReason: null,
@@ -405,7 +406,7 @@ export class CommercialConfigService {
       ...this.pricing.calculate({
         customerType: offer.customerType,
         cycle: version.billingCycle,
-        billingType: version.allowedBillingTypes[0],
+        billingType: this.allowedBillingTypes(offer.customerType, version.billingCycle, version.allowedBillingTypes, version.pricingRules)[0],
         baseAmount: Number(version.holderAmount || version.unitPrice || 0),
         dependentAmount: Number(version.dependentAmount || 0),
         dependentCount,
@@ -413,7 +414,7 @@ export class CommercialConfigService {
         lives,
         discounts: [],
       }),
-      allowedBillingTypes: version.allowedBillingTypes,
+      allowedBillingTypes: this.allowedBillingTypes(offer.customerType, version.billingCycle, version.allowedBillingTypes, version.pricingRules),
       limits: {
         maxDependents: version.maxDependents,
         minLives: version.minLives,
@@ -422,7 +423,7 @@ export class CommercialConfigService {
     };
   }
 
-  private publicVersion(version: CommercialOfferVersion) {
+  private publicVersion(offer: CommercialOffer, version: CommercialOfferVersion) {
     return {
       id: version.id,
       version: version.version,
@@ -433,7 +434,7 @@ export class CommercialConfigService {
       maxDependents: version.maxDependents,
       minLives: version.minLives,
       maxLives: version.maxLives,
-      allowedBillingTypes: version.allowedBillingTypes,
+      allowedBillingTypes: this.allowedBillingTypes(offer.customerType, version.billingCycle, version.allowedBillingTypes, version.pricingRules),
     };
   }
 
@@ -458,12 +459,39 @@ export class CommercialConfigService {
     if (customerType === CustomerType.PERSON && dto.holderAmount == null) {
       throw new BadRequestException('Informe o valor do titular.');
     }
+    if (customerType === CustomerType.PERSON) {
+      const allowed = this.allowedBillingTypes(customerType, dto.billingCycle, dto.allowedBillingTypes, dto.pricingRules || {});
+      if (!allowed.includes(BillingType.CREDIT_CARD)) {
+        throw new BadRequestException('Ofertas de pessoa física devem permitir cartão de crédito.');
+      }
+      if (allowed.length !== dto.allowedBillingTypes.length) {
+        throw new BadRequestException('Formas de pagamento incompatíveis com a periodicidade da oferta PF. Boleto mensal exige autorização e Pix é permitido apenas no anual.');
+      }
+    }
     if (customerType === CustomerType.COMPANY && dto.unitPrice == null) {
       throw new BadRequestException('Informe o preço por vida.');
     }
     if (dto.maxLives != null && dto.maxLives < (dto.minLives || 1)) {
       throw new BadRequestException('O máximo de vidas deve ser maior ou igual ao mínimo.');
     }
+  }
+
+
+  private allowedBillingTypes(
+    customerType: CustomerType,
+    cycle: BillingCycle,
+    configured: BillingType[],
+    pricingRules: Record<string, any> = {},
+  ) {
+    const unique = [...new Set((configured || []).filter((type) => type !== BillingType.UNDEFINED))];
+    if (customerType !== CustomerType.PERSON) return unique;
+    const yearly = cycle === BillingCycle.YEARLY;
+    return unique.filter((type) => {
+      if (type === BillingType.CREDIT_CARD) return true;
+      if (type === BillingType.BOLETO) return !yearly && pricingRules.allowMonthlyBoleto === true;
+      if (type === BillingType.PIX) return yearly;
+      return false;
+    });
   }
 
   private validateTemplateVariables(content: string, declared: string[]) {

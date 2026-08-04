@@ -130,4 +130,17 @@ describe('BillingService', () => {
       expect.objectContaining({ apiVersion: 3, email: 'alertas@example.com' }),
     );
   });
+  it('revela o token do webhook somente a partir do valor criptografado e audita o acesso', async () => {
+    const result = await service.revealWebhookSecret(unit.id, actor);
+
+    expect(result).toEqual({ token: 'a'.repeat(64) });
+    expect(encryption.decrypt).toHaveBeenCalledWith('enc-webhook-secret');
+    expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({
+      unitId: unit.id,
+      actorUserId: actor.id,
+      action: 'billing.webhook.secret.revealed',
+      resourceId: connection.id,
+    }));
+  });
+
 });

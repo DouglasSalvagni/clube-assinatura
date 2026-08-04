@@ -11,7 +11,7 @@ import {
 } from '../../database/entities';
 import { AuditService } from '../audit/audit.service';
 import { AsaasApiException, AsaasClient } from './asaas.client';
-import { ConfigureBillingDto } from './billing.dto';
+import { ConfigureAsaasWebhookDto, ConfigureBillingDto } from './billing.dto';
 import { EncryptionService } from './encryption.service';
 
 export const ASAAS_WEBHOOK_EVENTS = [
@@ -187,7 +187,7 @@ export class BillingService {
     }
   }
 
-  async setupWebhook(unitId: string, actor: User) {
+  async setupWebhook(unitId: string, actor: User, dto: ConfigureAsaasWebhookDto = {}) {
     const unit = await this.unitRepository.findOne({ where: { id: unitId, active: true } });
     if (!unit) throw new NotFoundException('Unidade não encontrada.');
 
@@ -196,7 +196,7 @@ export class BillingService {
       throw new BadRequestException('Habilite e salve a integração antes de configurar o webhook.');
     }
 
-    const email = connection.webhookEmail || process.env.ASAAS_WEBHOOK_ALERT_EMAIL;
+    const email = dto.email?.trim().toLowerCase() || connection.webhookEmail || process.env.ASAAS_WEBHOOK_ALERT_EMAIL;
     if (!email) {
       throw new BadRequestException('Informe o e-mail de alertas do webhook e salve a configuração.');
     }
@@ -208,15 +208,15 @@ export class BillingService {
     const existingSecret = this.decryptOptional(connection.webhookSecretEncrypted);
     const secret = existingSecret || randomBytes(32).toString('hex');
     const payload = {
-      name: this.webhookName(unit),
+      name: dto.name?.trim() || this.webhookName(unit),
       url,
       email,
-      enabled: true,
+      enabled: dto.enabled ?? true,
       interrupted: false,
       apiVersion: 3,
       authToken: secret,
-      sendType: 'SEQUENTIALLY',
-      events: [...ASAAS_WEBHOOK_EVENTS],
+      sendType: dto.sendType || 'SEQUENTIALLY',
+      events: this.validateWebhookEvents(dto.events),
     };
 
     let remote: RemoteWebhook | null = null;
@@ -297,6 +297,75 @@ export class BillingService {
       await this.repository.save(connection);
       throw error;
     }
+  }
+
+
+  async updateWebhook(unitId: string, actor: User, dto: ConfigureAsaasWebhookDto) {
+    const connection = await this.requireConnection(unitId);
+    if (!connection.externalWebhookId) {
+      throw new NotFoundException('Webhook não configurado. Crie o webhook antes de editá-lo.');
+    }
+    const remote = await this.asaas.getWebhook(unitId, connection.externalWebhookId) as RemoteWebhook;
+    const secret = this.decryptOptional(connection.webhookSecretEncrypted);
+    if (!secret) {
+      throw new BadRequestException('O token local do webhook não está disponível. Remova e recrie o webhook.');
+    }
+    const payload = {
+      name: dto.name?.trim() || remote.name || 'Webhook Asaas',
+      url: remote.url || connection.webhookUrl,
+      email: dto.email?.trim().toLowerCase() || remote.email || connection.webhookEmail,
+      enabled: dto.enabled ?? remote.enabled ?? true,
+      interrupted: false,
+      apiVersion: 3,
+      authToken: secret,
+      sendType: dto.sendType || remote.sendType || 'SEQUENTIALLY',
+      events: this.validateWebhookEvents(dto.events || remote.events),
+    };
+    if (!payload.url || !payload.email) throw new BadRequestException('URL e e-mail do webhook são obrigatórios.');
+    const updated = await this.asaas.updateWebhook(unitId, connection.externalWebhookId, payload) as RemoteWebhook;
+    connection.webhookEmail = payload.email;
+    connection.webhookUrl = payload.url;
+    connection.lastWebhookSyncAt = new Date();
+    connection.lastWebhookError = null;
+    await this.repository.save(connection);
+    await this.audit.record({
+      unitId,
+      actorUserId: actor.id,
+      action: 'billing.webhook.updated',
+      resourceType: 'billing_connection',
+      resourceId: connection.id,
+      beforeData: { webhookId: connection.externalWebhookId },
+      afterData: { webhookId: connection.externalWebhookId, name: payload.name, enabled: payload.enabled, sendType: payload.sendType, events: payload.events },
+    });
+    return { success: true, webhookId: connection.externalWebhookId, ...updated, syncedAt: connection.lastWebhookSyncAt };
+  }
+
+  async revealWebhookSecret(unitId: string, actor: User) {
+    const connection = await this.repository.findOne({
+      where: { unitId, provider: BillingProviderName.ASAAS },
+    });
+    if (!connection?.externalWebhookId) {
+      throw new NotFoundException('Webhook não configurado.');
+    }
+
+    const token = this.decryptOptional(connection.webhookSecretEncrypted);
+    if (!token) {
+      throw new NotFoundException(
+        'O token de autenticação não está disponível localmente. Sincronize ou recrie o webhook.',
+      );
+    }
+
+    await this.audit.record({
+      unitId,
+      actorUserId: actor.id,
+      action: 'billing.webhook.secret.revealed',
+      resourceType: 'billing_connection',
+      resourceId: connection.id,
+      beforeData: null,
+      afterData: { webhookId: connection.externalWebhookId },
+    });
+
+    return { token };
   }
 
   async webhookStatus(unitId: string) {
@@ -462,6 +531,14 @@ export class BillingService {
       || (previousUrl ? webhooks.find((item) => item.url === previousUrl) : null)
       || webhooks.find((item) => item.name === name)
       || null;
+  }
+
+
+  private validateWebhookEvents(events?: string[]) {
+    const requested = events?.length ? [...new Set(events.map((event) => String(event).trim()).filter(Boolean))] : [...ASAAS_WEBHOOK_EVENTS];
+    const unsupported = requested.filter((event) => !ASAAS_WEBHOOK_EVENTS.includes(event as any));
+    if (unsupported.length) throw new BadRequestException(`Eventos de webhook não permitidos: ${unsupported.join(', ')}.`);
+    return requested;
   }
 
   private webhookChanged(remote: RemoteWebhook, expected: Record<string, any>) {
