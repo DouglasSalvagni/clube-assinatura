@@ -13,6 +13,7 @@ export const PERMISSIONS = {
   OPPORTUNITIES_READ: 'opportunities.read',
   OPPORTUNITIES_MANAGE: 'opportunities.manage',
   OPPORTUNITIES_ASSIGN: 'opportunities.assign',
+  OPPORTUNITIES_DISTRIBUTE: 'opportunities.distribute',
   NEGOTIATIONS_EDIT: 'negotiations.edit',
   NEGOTIATIONS_REQUEST_APPROVAL: 'negotiations.request_approval',
   NEGOTIATIONS_APPROVE: 'negotiations.approve',

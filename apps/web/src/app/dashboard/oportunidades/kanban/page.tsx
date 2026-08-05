@@ -4,6 +4,7 @@ import { CSSProperties, DragEvent, useCallback, useEffect, useMemo, useRef, useS
 import { useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { usePageTitle } from '@/lib/page-title-context';
+import { useAuth } from '@/lib/auth-context';
 import { KanbanSkeleton } from '@/components/page-skeleton';
 
 const labels: Record<string, string> = {
@@ -87,6 +88,7 @@ function initials(value: string) {
 export default function OpportunitiesKanbanPage() {
   const router = useRouter();
   const { setPageTitle } = usePageTitle();
+  const { user } = useAuth();
   const boardRef = useRef<HTMLDivElement>(null);
   const draggedIdRef = useRef('');
   const dragSnapshotRef = useRef<DragSnapshot | null>(null);
@@ -106,6 +108,11 @@ export default function OpportunitiesKanbanPage() {
     customerType: '',
     commercialStatus: '',
   });
+
+  const selectedUnitId = typeof window !== 'undefined' ? localStorage.getItem('tenantId') || localStorage.getItem('unitId') : null;
+  const currentMembership = user?.memberships?.find((item) => item.active && item.unitId === selectedUnitId)
+    || user?.memberships?.find((item) => item.active);
+  const canDistribute = Boolean(user?.is_platform_admin || ['OWNER', 'ADMIN', 'MANAGER'].includes(currentMembership?.role || ''));
 
   const query = useMemo(() => {
     const params = new URLSearchParams();
@@ -425,6 +432,14 @@ export default function OpportunitiesKanbanPage() {
               <p className="text-xs text-ink-tertiary">{totalItems} oportunidade(s)</p>
               <p className="text-sm font-semibold text-ink">{formatCurrency(totalValue)}</p>
             </div>
+            {canDistribute && (
+              <button
+                onClick={() => router.push('/dashboard/oportunidades/distribuicao')}
+                className="rounded-lg border border-brand/30 bg-brand/5 px-3.5 py-2 text-sm font-medium text-brand transition hover:bg-brand/10"
+              >
+                Distribuir
+              </button>
+            )}
             <button
               onClick={() => router.push('/dashboard/oportunidades')}
               className="rounded-lg border border-edge bg-surface px-3.5 py-2 text-sm font-medium text-ink-secondary transition hover:border-edge-emphasis hover:text-ink"

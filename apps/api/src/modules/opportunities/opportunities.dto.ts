@@ -1,5 +1,5 @@
 import { Transform } from 'class-transformer';
-import { IsArray, IsDateString, IsEnum, IsNumber, IsOptional, IsString, IsUUID, Min, MinLength } from 'class-validator';
+import { ArrayMinSize, IsArray, IsBoolean, IsDateString, IsEnum, IsNumber, IsOptional, IsString, IsUUID, Min, MinLength } from 'class-validator';
 import { BillingCycle, BillingType, CommercialStatus, CustomerType } from '../../database/entities';
 import { EmptyToUndefined } from '../../common/decorators/empty-to-undefined.decorator';
 const digits = ({ value }: { value: any }) => value == null ? value : String(value).replace(/\D/g, '');
@@ -44,4 +44,23 @@ export class AssignOpportunityDto {
 }
 export class MoveOpportunityStageDto {
   @IsUUID() stageId: string;
+}
+
+
+export enum AutomaticDistributionMode {
+  QUEUE_ONLY = 'QUEUE_ONLY',
+  REBALANCE_ALL = 'REBALANCE_ALL',
+}
+
+export class BulkAssignOpportunitiesDto {
+  @IsUUID() teamId: string;
+  @IsArray() @ArrayMinSize(1) @IsUUID(undefined, { each: true }) opportunityIds: string[];
+  @IsOptional() @IsUUID() ownerUserId?: string | null;
+}
+
+export class AutoDistributeOpportunitiesDto {
+  @IsUUID() teamId: string;
+  @IsOptional() @IsEnum(AutomaticDistributionMode) mode?: AutomaticDistributionMode;
+  @IsOptional() @IsBoolean() includeManager?: boolean;
+  @IsOptional() @IsArray() @ArrayMinSize(1) @IsUUID(undefined, { each: true }) opportunityIds?: string[];
 }

@@ -10,14 +10,18 @@ import { PermissionsGuard } from '../../common/guards/permissions.guard';
 import { UnitAccessGuard } from '../../common/guards/unit-access.guard';
 import { PERMISSIONS } from '../../common/utils/permissions';
 import { Membership, User } from '../../database/entities';
-import { AssignOpportunityDto, CancelOpportunityDto, CreateOpportunityDependentDto, CreateOpportunityDto, MoveOpportunityStageDto, UpdateOpportunityDependentDto, UpdateOpportunityDto } from './opportunities.dto';
+import { AssignOpportunityDto, AutoDistributeOpportunitiesDto, BulkAssignOpportunitiesDto, CancelOpportunityDto, CreateOpportunityDependentDto, CreateOpportunityDto, MoveOpportunityStageDto, UpdateOpportunityDependentDto, UpdateOpportunityDto } from './opportunities.dto';
+import { OpportunityDistributionService } from './opportunity-distribution.service';
 import { OpportunitiesService } from './opportunities.service';
 
 @ApiTags('Oportunidades') @ApiBearerAuth()
 @Controller('oportunidades')
 @UseGuards(JwtAuthGuard, UnitAccessGuard, PermissionsGuard)
 export class OpportunitiesController {
-  constructor(private readonly service: OpportunitiesService) {}
+  constructor(
+    private readonly service: OpportunitiesService,
+    private readonly distribution: OpportunityDistributionService,
+  ) {}
 
   @Get() @RequirePermissions(PERMISSIONS.OPPORTUNITIES_READ)
   list(
@@ -52,6 +56,41 @@ export class OpportunitiesController {
       unitIds,user.id,membership?.role||null,user.globalRole,
       {ownerUserId,teamId,customerType,commercialStatus},
     );
+  }
+  @Get('distribution/teams') @RequirePermissions(PERMISSIONS.OPPORTUNITIES_DISTRIBUTE)
+  distributionTeams(
+    @CurrentUnitId()unitId:string,
+    @CurrentUser()user:User,
+    @CurrentMembership()membership:Membership|null,
+  ){
+    return this.distribution.manageableTeams(unitId,user.id,membership?.role||null,user.globalRole);
+  }
+  @Get('distribution/teams/:teamId') @RequirePermissions(PERMISSIONS.OPPORTUNITIES_DISTRIBUTE)
+  distributionDashboard(
+    @CurrentUnitId()unitId:string,
+    @Param('teamId')teamId:string,
+    @CurrentUser()user:User,
+    @CurrentMembership()membership:Membership|null,
+  ){
+    return this.distribution.dashboard(unitId,teamId,user.id,membership?.role||null,user.globalRole);
+  }
+  @Patch('distribution/bulk') @RequirePermissions(PERMISSIONS.OPPORTUNITIES_DISTRIBUTE)
+  bulkDistribution(
+    @CurrentUnitId()unitId:string,
+    @Body()dto:BulkAssignOpportunitiesDto,
+    @CurrentUser()user:User,
+    @CurrentMembership()membership:Membership|null,
+  ){
+    return this.distribution.bulkAssign(unitId,dto,user.id,membership?.role||null,user.globalRole);
+  }
+  @Post('distribution/auto') @RequirePermissions(PERMISSIONS.OPPORTUNITIES_DISTRIBUTE)
+  automaticDistribution(
+    @CurrentUnitId()unitId:string,
+    @Body()dto:AutoDistributeOpportunitiesDto,
+    @CurrentUser()user:User,
+    @CurrentMembership()membership:Membership|null,
+  ){
+    return this.distribution.autoDistribute(unitId,dto,user.id,membership?.role||null,user.globalRole);
   }
   @Post() @RequirePermissions(PERMISSIONS.OPPORTUNITIES_MANAGE)
   create(@CurrentUnitId()unitId:string,@CurrentUser()user:User,@Body()dto:CreateOpportunityDto){return this.service.create(unitId,user.id,dto)}

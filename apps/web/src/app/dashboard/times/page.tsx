@@ -215,6 +215,13 @@ export default function TimesPage() {
   const availableUsers = (teamId: string) =>
     commercialUsers.filter((user) => !teams.find((team) => team.id === teamId)?.members.some((member) => member.userId === user.id));
 
+  const selectedUnitId = typeof window !== 'undefined' ? localStorage.getItem('tenantId') || localStorage.getItem('unitId') : null;
+  const currentMembership = currentUser?.memberships?.find((item) => item.active && item.unitId === selectedUnitId)
+    || currentUser?.memberships?.find((item) => item.active);
+  const canManageEveryTeam = Boolean(currentUser?.is_platform_admin || ['OWNER', 'ADMIN'].includes(currentMembership?.role || ''));
+  const canDistributeTeam = (team: Team) => canManageEveryTeam
+    || (currentMembership?.role === 'MANAGER' && team.managerId === currentUser?.id);
+
   const teamCountForUser = (userId: string) =>
     teams.filter((team) => team.members?.some((member) => member.userId === userId)).length;
 
@@ -236,7 +243,7 @@ export default function TimesPage() {
       </div>
 
       <div className="mb-5 rounded-xl border border-edge bg-surface-elevated p-4 text-sm text-ink-secondary">
-        <p><strong>Participação em vários times:</strong> é permitida para perfis comerciais. Uma oportunidade com responsável individual aparece somente para ele, para o gerente formal do time e para administradores. Uma oportunidade sem responsável pertence à fila compartilhada e aparece para os membros comerciais daquele time.</p>
+        <p><strong>Participação e gestão de vários times:</strong> um usuário comercial pode participar de vários times e o mesmo gerente pode gerenciar mais de um time. Cada time mantém sua própria fila. Uma oportunidade com responsável individual aparece somente para ele, para o gerente formal do time e para administradores. Uma oportunidade sem responsável pertence à fila compartilhada e aparece para os membros comerciais daquele time.</p>
       </div>
       {error && <div className="mb-5 rounded-lg border border-danger/30 bg-danger/10 p-3 text-sm text-danger">{error}</div>}
 
@@ -267,6 +274,14 @@ export default function TimesPage() {
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
+                  {canDistributeTeam(team) && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); router.push(`/dashboard/oportunidades/distribuicao?teamId=${team.id}`); }}
+                      className="rounded-md px-3 py-1.5 text-xs font-medium text-brand transition hover:bg-brand/10"
+                    >
+                      Distribuir leads
+                    </button>
+                  )}
                   <button
                     onClick={(e) => { e.stopPropagation(); openAddMember(team.id); }}
                     className="rounded-md px-3 py-1.5 text-xs font-medium text-brand transition hover:bg-brand/10"

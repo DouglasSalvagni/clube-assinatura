@@ -156,3 +156,18 @@
 - [x] Todo contrato convertido possui snapshot JSONB, versão e evidência de aceite.
 - [x] Webhooks não geram vendas ou assinaturas duplicadas.
 - [x] Administradores gerenciam ofertas, limites, permissões e contratos pelo painel.
+
+## Distribuição de oportunidades por time
+
+- [x] Permitir que um gerente seja responsável por mais de um time.
+- [x] Restringir a distribuição em massa ao gerente formal do time, administrador da sede e administrador da instalação.
+- [x] Criar painel de distribuição por time com fila e carga de cada membro.
+- [x] Permitir selecionar várias oportunidades e atribuí-las em massa.
+- [x] Permitir arrastar uma ou várias oportunidades entre responsáveis.
+- [x] Permitir devolver oportunidades à fila compartilhada do time.
+- [x] Implementar distribuição automática pelo menor número de oportunidades ativas.
+- [x] Permitir incluir ou excluir o gerente da distribuição automática.
+- [x] Permitir distribuir apenas a fila ou reequilibrar todo o time.
+- [x] Registrar redistribuições no histórico de ciclo de vida.
+- [x] Bloquear membros inativos ou sem perfil comercial como responsáveis.
+- [x] Adicionar testes do algoritmo e de gerente responsável por vários times.

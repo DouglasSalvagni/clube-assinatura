@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { usePageTitle } from '@/lib/page-title-context';
 import { useDialog } from '@/lib/dialog-context';
+import { useAuth } from '@/lib/auth-context';
 import { formatPhone, formatCpfCnpj, maskCpfCnpj, maskPhone, stripMask } from '@/lib/format';
 import { PageSkeleton } from '@/components/page-skeleton';
 
@@ -61,6 +62,7 @@ export default function OportunidadesPage() {
   const router = useRouter();
   const { setPageTitle } = usePageTitle();
   const { alert } = useDialog();
+  const { user } = useAuth();
   const [loaded, setLoaded] = useState(false);
   const [pageData, setPageData] = useState<PageData | null>(null);
   const [search, setSearch] = useState('');
@@ -111,6 +113,11 @@ export default function OportunidadesPage() {
       setCreating(false);
     }
   }
+
+  const selectedUnitId = typeof window !== 'undefined' ? localStorage.getItem('tenantId') || localStorage.getItem('unitId') : null;
+  const currentMembership = user?.memberships?.find((item) => item.active && item.unitId === selectedUnitId)
+    || user?.memberships?.find((item) => item.active);
+  const canDistribute = Boolean(user?.is_platform_admin || ['OWNER', 'ADMIN', 'MANAGER'].includes(currentMembership?.role || ''));
 
   const fmtBRL = (v: number) =>
     (v || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
@@ -164,6 +171,12 @@ export default function OportunidadesPage() {
             <option value="convertida">Convertida</option>
             <option value="cancelada">Cancelada</option>
           </select>
+          {canDistribute && (
+            <button onClick={() => router.push('/dashboard/oportunidades/distribuicao')}
+              className="rounded-lg border border-brand/30 bg-brand/5 px-4 py-2 text-sm font-medium text-brand hover:bg-brand/10">
+              Distribuir oportunidades
+            </button>
+          )}
           <button onClick={() => router.push('/dashboard/oportunidades/kanban')}
             className="rounded-lg border border-edge bg-surface-elevated px-4 py-2 text-sm font-medium text-ink-secondary hover:text-ink">
             Kanban
