@@ -3,8 +3,9 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Brackets, DataSource, In, Repository } from 'typeorm';
 import {
   AccessStatus, BillingCustomer, BillingCycle, BillingProviderName, BillingType, CheckoutSession, CheckoutStatus,
-  CommercialPipelineStage, CommercialStatus, Contract, ContractStatus, CustomerType, FinancialStatus, GlobalRole, LifecycleSource,
-  MemberRole, Membership, Opportunity, OpportunityMember, OpportunityStatus, Person, PlanPrice, PrecheckoutSession,
+  CommercialPipelineStage, CommercialPriceTableVersion, CommercialPriceTableVersionStatus, CommercialStatus, Contract,
+  ContractStatus, ContractTemplate, ContractTemplateStatus, ContractTemplateVersion, CustomerType, FinancialStatus, GlobalRole, LifecycleSource,
+  MemberRole, Membership, Opportunity, OpportunityMember, OpportunityStatus, Person, PersonKind, PlanPrice, PrecheckoutSession,
   PrecheckoutStatus, Sale, Subscription, SubscriptionMember, SubscriptionMemberStatus, SubscriptionStatus,
   Team, TeamMember, UnitRole, User,
 } from '../../database/entities';
@@ -33,6 +34,9 @@ export class OpportunitiesService {
     @InjectRepository(CommercialPipelineStage) private readonly stageRepo:Repository<CommercialPipelineStage>,
     @InjectRepository(Contract) private readonly contractRepo:Repository<Contract>,
     @InjectRepository(PrecheckoutSession) private readonly precheckoutRepo:Repository<PrecheckoutSession>,
+    @InjectRepository(CommercialPriceTableVersion) private readonly priceTableRepo:Repository<CommercialPriceTableVersion>,
+    @InjectRepository(ContractTemplateVersion) private readonly contractTemplateVersionRepo:Repository<ContractTemplateVersion>,
+    @InjectRepository(ContractTemplate) private readonly contractTemplateRepo:Repository<ContractTemplate>,
     private readonly people:PeopleService,
     private readonly asaas:AsaasClient,
     private readonly billing:BillingService,
@@ -43,24 +47,68 @@ export class OpportunitiesService {
   ){}
 
   async create(unitId:string,userId:string,dto:CreateOpportunityDto){
-    const customerType=dto.customerType||CustomerType.PERSON;
+    if(!dto.customerType){
+      throw new BadRequestException('Informe se a oportunidade é de pessoa física ou pessoa jurídica.');
+    }
+    const customerType=dto.customerType;
     if(dto.cpfCnpj){
       const taxId=normalizeTaxId(dto.cpfCnpj);
       const valid=customerType===CustomerType.COMPANY?isValidCnpj(taxId):isValidCpf(taxId);
       if(!valid)throw new BadRequestException(customerType===CustomerType.COMPANY?'CNPJ inválido.':'CPF inválido.');
       dto.cpfCnpj=taxId;
     }
-    const person=await this.people.upsertByTaxId(unitId,this.personDto(dto));
-    if(dto.negotiation&&dto.cycle){
-      this.validatePersonPaymentRules(customerType,dto.cycle,dto.allowedBillingTypes||[],dto.billingType);
+
+    const person=await this.people.upsertByTaxId(unitId,this.personDto(dto,customerType));
+    const priceTable=await this.resolvePriceTable(unitId,customerType,dto.priceTableVersionId);
+    const cycle=customerType===CustomerType.COMPANY?BillingCycle.MONTHLY:(dto.cycle||BillingCycle.MONTHLY);
+    const tableBillingTypes=priceTable
+      ? cycle===BillingCycle.YEARLY?priceTable.yearlyBillingTypes:priceTable.monthlyBillingTypes
+      : [];
+    const allowedBillingTypes=dto.allowedBillingTypes?.length
+      ? dto.allowedBillingTypes
+      : tableBillingTypes.length?tableBillingTypes:(dto.billingType?[dto.billingType]:[]);
+    const billingType=dto.billingType||allowedBillingTypes[0]||null;
+
+    let snapshot:Record<string,any>={};
+    const negotiation=dto.negotiation||this.negotiationFromPriceTable(priceTable,customerType);
+    if(negotiation){
+      this.validatePaymentRules(customerType,cycle,allowedBillingTypes,billingType);
+      const calculated=this.pricing.calculate({
+        ...negotiation,
+        customerType,
+        cycle,
+        billingType:billingType||undefined,
+        annualDiscountPercent:priceTable
+          ?Number(priceTable.annualDiscountPercent||0)
+          :Number(negotiation.annualDiscountPercent||0),
+      } as any);
+      this.validatePriceTableParticipants(priceTable,calculated);
+      snapshot={
+        ...calculated,
+        allowedBillingTypes,
+        limits:priceTable?{
+          maxDependents:priceTable.maxDependents,
+          minLives:priceTable.minLives,
+          maxLives:priceTable.maxLives,
+        }:undefined,
+        priceTable:priceTable?{
+          id:priceTable.id,
+          version:priceTable.version,
+          customerType:priceTable.customerType,
+        }:undefined,
+        contractTemplateVersionId:dto.contractTemplateVersionId||priceTable?.contractTemplateVersionId||null,
+        source:priceTable?'DEFAULT_PRICE_TABLE':'MANUAL_NEGOTIATION',
+      };
     }
-    const calculated=dto.negotiation&&dto.cycle
-      ? this.pricing.calculate({...dto.negotiation,customerType:dto.customerType||CustomerType.PERSON,cycle:dto.cycle,billingType:dto.billingType} as any)
-      : {};
-    const snapshot=dto.negotiation&&dto.cycle
-      ? {...calculated,allowedBillingTypes:dto.allowedBillingTypes?.length?dto.allowedBillingTypes:(dto.billingType?[dto.billingType]:[])}
-      : {};
-    const finalValue=(snapshot as any)?.pricing?.finalAmount ?? dto.valor;
+
+    const contractTemplateVersionId=dto.contractTemplateVersionId
+      ||priceTable?.contractTemplateVersionId
+      ||null;
+    if(contractTemplateVersionId){
+      await this.assertContractTemplate(unitId,contractTemplateVersionId,customerType);
+    }
+
+    const finalValue=snapshot?.pricing?.finalAmount??dto.valor;
     let teamId:string|null=null;
     let ownerUserId:string|null=userId;
     if(dto.teamId){
@@ -70,9 +118,38 @@ export class OpportunitiesService {
       const creatorBelongsToTeam=await this.teamMemberRepo.exists({where:{unitId,teamId:team.id,userId}});
       if(!creatorBelongsToTeam)ownerUserId=null;
     }
-    const opp=await this.repo.save(this.repo.create({unitId,primaryPersonId:person.id,ownerUserId,teamId,pipelineStageId:null,offerVersionId:null,customerType:dto.customerType||CustomerType.PERSON,commercialStatus:dto.commercialStatus||CommercialStatus.DRAFT,negotiationSnapshot:snapshot,planPriceId:dto.planPriceId||null,status:OpportunityStatus.OPEN,expectedValue:finalValue!==undefined?Number(finalValue).toFixed(2):null,billingCycle:dto.cycle||null,billingType:dto.billingType||null,acquisitionSource:dto.acquisitionSource||null,notes:dto.notes||null,lossReason:null,asaasCustomerId:null,wonAt:null,cancelledAt:null}));
-    await this.memberRepo.save(this.memberRepo.create({unitId,opportunityId:opp.id,personId:person.id,role:MemberRole.PRIMARY,relationship:null}));
-    await this.lifecycle.record({unitId,personId:person.id,type:'opportunity.created',source:LifecycleSource.API,actorUserId:userId,metadata:{opportunityId:opp.id}});
+
+    const opp=await this.repo.save(this.repo.create({
+      unitId,
+      primaryPersonId:person.id,
+      ownerUserId,
+      teamId,
+      pipelineStageId:null,
+      offerVersionId:null,
+      priceTableVersionId:priceTable?.id||null,
+      contractTemplateVersionId,
+      customerType,
+      commercialStatus:dto.commercialStatus||CommercialStatus.DRAFT,
+      negotiationSnapshot:snapshot,
+      planPriceId:dto.planPriceId||null,
+      status:OpportunityStatus.OPEN,
+      expectedValue:finalValue!==undefined?Number(finalValue).toFixed(2):null,
+      billingCycle:snapshot?.cycle||cycle||null,
+      billingType:snapshot?.billingType||billingType,
+      acquisitionSource:dto.acquisitionSource||null,
+      notes:dto.notes||null,
+      lossReason:null,
+      asaasCustomerId:null,
+      wonAt:null,
+      cancelledAt:null,
+    }));
+    await this.memberRepo.save(this.memberRepo.create({
+      unitId,opportunityId:opp.id,personId:person.id,role:MemberRole.PRIMARY,relationship:null,
+    }));
+    await this.lifecycle.record({
+      unitId,personId:person.id,type:'opportunity.created',source:LifecycleSource.API,
+      actorUserId:userId,metadata:{opportunityId:opp.id,priceTableVersionId:opp.priceTableVersionId},
+    });
     return this.serialize(opp,person);
   }
 
@@ -147,31 +224,204 @@ export class OpportunitiesService {
 
   async detail(unitId:string,id:string,userId?:string,unitRole?:UnitRole|null,globalRole?:GlobalRole){const opp=await this.getEntity(unitId,id,userId,unitRole,globalRole);const person=await this.personRepo.findOneByOrFail({id:opp.primaryPersonId,unitId});const members=await this.memberRepo.find({where:{unitId,opportunityId:id,role:MemberRole.DEPENDENT},order:{createdAt:'ASC'}});const people=members.length?await this.personRepo.find({where:{id:In(members.map(m=>m.personId)),unitId}}):[];const checkout=await this.checkoutRepo.findOne({where:{unitId,opportunityId:id},order:{createdAt:'DESC'}});const sub=await this.subscriptionRepo.findOne({where:{unitId,sourceOpportunityId:id},order:{createdAt:'DESC'}});const result:any=this.serialize(opp,person);result.dependentes=members.map(m=>{const p=people.find(x=>x.id===m.personId)!;return{id:m.id,nome:p.name,cpf:p.taxId,dataNascimento:p.birthDate,relationship:m.relationship}});result.checkoutId=checkout?.externalId||null;result.checkoutLink=checkout?.url||null;result.checkoutExpiresAt=checkout?.expiresAt||null;result.subscriptionId=sub?.externalSubscriptionId||sub?.id||null;result.boletoUrl=checkout?.payload?.bankSlipUrl||null;result.pixPayload=checkout?.payload?.pixPayload||null;result.pixEncodedImage=checkout?.payload?.pixEncodedImage||null;result.pixExpirationDate=checkout?.payload?.pixExpirationDate||null;result.camposPendentes=this.pending(result);result.checkoutReady=result.camposPendentes.length===0;return result;}
 
-  async update(unitId:string,id:string,dto:UpdateOpportunityDto,userId?:string,unitRole?:UnitRole|null,globalRole?:GlobalRole){const opp=await this.getEntity(unitId,id,userId,unitRole,globalRole);if(opp.status===OpportunityStatus.WON)throw new BadRequestException('Oportunidade convertida não pode ser editada.');if(dto.cpfCnpj){const customerType=dto.customerType||opp.customerType;const taxId=normalizeTaxId(dto.cpfCnpj);const valid=customerType===CustomerType.COMPANY?isValidCnpj(taxId):isValidCpf(taxId);if(!valid)throw new BadRequestException(customerType===CustomerType.COMPANY?'CNPJ inválido.':'CPF inválido.');dto.cpfCnpj=taxId;}const person=await this.personRepo.findOneByOrFail({id:opp.primaryPersonId,unitId});const p=this.personDto(dto as any);for(const[k,v]of Object.entries(p))if(v!==undefined&&v!==null&&(v!==''||k==='email'))(person as any)[k]=v;if(dto.valor!==undefined)opp.expectedValue=dto.valor.toFixed(2);if(dto.cycle!==undefined)opp.billingCycle=dto.cycle;if(dto.billingType!==undefined)opp.billingType=dto.billingType;if(dto.planPriceId!==undefined)opp.planPriceId=dto.planPriceId;if(dto.acquisitionSource!==undefined)opp.acquisitionSource=dto.acquisitionSource;if(dto.notes!==undefined)opp.notes=dto.notes;
+  async update(
+    unitId:string,
+    id:string,
+    dto:UpdateOpportunityDto,
+    userId?:string,
+    unitRole?:UnitRole|null,
+    globalRole?:GlobalRole,
+  ){
+    const opp=await this.getEntity(unitId,id,userId,unitRole,globalRole);
+    if(opp.status===OpportunityStatus.WON){
+      throw new BadRequestException('Oportunidade convertida não pode ser editada.');
+    }
+
+    const effectiveCustomerType=dto.customerType||opp.customerType;
+    const customerTypeChanged=effectiveCustomerType!==opp.customerType;
+    if(customerTypeChanged&&effectiveCustomerType===CustomerType.COMPANY){
+      const dependentCount=await this.memberRepo.count({
+        where:{unitId,opportunityId:id,role:MemberRole.DEPENDENT},
+      });
+      if(dependentCount){
+        throw new BadRequestException(
+          'Remova os dependentes antes de alterar a oportunidade para pessoa jurídica.',
+        );
+      }
+    }
+    if(dto.cpfCnpj){
+      const taxId=normalizeTaxId(dto.cpfCnpj);
+      const valid=effectiveCustomerType===CustomerType.COMPANY?isValidCnpj(taxId):isValidCpf(taxId);
+      if(!valid)throw new BadRequestException(effectiveCustomerType===CustomerType.COMPANY?'CNPJ inválido.':'CPF inválido.');
+      dto.cpfCnpj=taxId;
+    }
+
+    const person=await this.personRepo.findOneByOrFail({id:opp.primaryPersonId,unitId});
+    if(customerTypeChanged){
+      const taxId=normalizeTaxId(dto.cpfCnpj||person.taxId||'');
+      const valid=effectiveCustomerType===CustomerType.COMPANY?isValidCnpj(taxId):isValidCpf(taxId);
+      if(!valid){
+        throw new BadRequestException(
+          effectiveCustomerType===CustomerType.COMPANY
+            ?'Informe um CNPJ válido ao alterar para pessoa jurídica.'
+            :'Informe um CPF válido ao alterar para pessoa física.',
+        );
+      }
+      dto.cpfCnpj=taxId;
+    }
+    const personPatch=this.personDto(dto as any,effectiveCustomerType);
+    for(const[key,value]of Object.entries(personPatch)){
+      if(value!==undefined&&value!==null&&(value!==''||key==='email'))(person as any)[key]=value;
+    }
+
+    if(dto.valor!==undefined)opp.expectedValue=dto.valor.toFixed(2);
+    if(dto.planPriceId!==undefined)opp.planPriceId=dto.planPriceId;
+    if(dto.acquisitionSource!==undefined)opp.acquisitionSource=dto.acquisitionSource;
+    if(dto.notes!==undefined)opp.notes=dto.notes;
     if(dto.customerType!==undefined)opp.customerType=dto.customerType;
     if(dto.commercialStatus!==undefined)opp.commercialStatus=dto.commercialStatus;
     if(dto.teamId!==undefined&&dto.teamId!==opp.teamId){
       throw new BadRequestException('Use a seção de responsabilidade comercial para alterar o time da oportunidade.');
     }
-    if(dto.negotiation!==undefined){
-      if(!dto.cycle&&!opp.billingCycle)throw new BadRequestException('Periodicidade obrigatória para calcular a negociação.');
-      const effectiveCustomerType=dto.customerType||opp.customerType;
-      const effectiveCycle=dto.cycle||opp.billingCycle;
-      const existingAllowed=opp.negotiationSnapshot?.allowedBillingTypes||[];
-      const allowedBillingTypes=dto.allowedBillingTypes?.length
-        ? dto.allowedBillingTypes
-        : existingAllowed.length?existingAllowed:(dto.billingType||opp.billingType?[dto.billingType||opp.billingType]:[]);
-      this.validatePersonPaymentRules(effectiveCustomerType,effectiveCycle,allowedBillingTypes,dto.billingType||opp.billingType);
-      const calculation=this.pricing.calculate({...dto.negotiation,customerType:effectiveCustomerType,cycle:effectiveCycle,billingType:dto.billingType||opp.billingType} as any);
-      const snapshot={...calculation,allowedBillingTypes};
-      const negotiationChanged=this.canonical(opp.negotiationSnapshot||{})!==this.canonical(snapshot);
+
+    const requestedPriceTableVersionId=dto.priceTableVersionId!==undefined
+      ?dto.priceTableVersionId
+      :customerTypeChanged
+        ?undefined
+        :opp.priceTableVersionId||undefined;
+    const shouldUsePriceTable=Boolean(requestedPriceTableVersionId)||customerTypeChanged;
+    const priceTable=shouldUsePriceTable
+      ?await this.resolvePriceTable(
+          unitId,
+          effectiveCustomerType,
+          requestedPriceTableVersionId,
+          Boolean(requestedPriceTableVersionId&&requestedPriceTableVersionId===opp.priceTableVersionId),
+        )
+      :null;
+    if(dto.priceTableVersionId!==undefined||customerTypeChanged){
+      opp.priceTableVersionId=priceTable?.id||null;
+    }
+
+    const contractTemplateVersionId=dto.contractTemplateVersionId!==undefined
+      ?dto.contractTemplateVersionId
+      :customerTypeChanged
+        ?priceTable?.contractTemplateVersionId||null
+        :opp.contractTemplateVersionId||priceTable?.contractTemplateVersionId||null;
+    if(contractTemplateVersionId){
+      await this.assertContractTemplate(unitId,contractTemplateVersionId,effectiveCustomerType);
+    }
+    const contractChanged=contractTemplateVersionId!==opp.contractTemplateVersionId;
+    if(dto.contractTemplateVersionId!==undefined||customerTypeChanged||(!opp.contractTemplateVersionId&&contractTemplateVersionId)){
+      opp.contractTemplateVersionId=contractTemplateVersionId;
+    }
+
+    const effectiveCycle=effectiveCustomerType===CustomerType.COMPANY
+      ?BillingCycle.MONTHLY
+      :(dto.cycle||opp.billingCycle||BillingCycle.MONTHLY);
+    const existingAllowed=Array.isArray(opp.negotiationSnapshot?.allowedBillingTypes)
+      ?opp.negotiationSnapshot.allowedBillingTypes as BillingType[]
+      :[];
+    const tableAllowed=priceTable
+      ?effectiveCycle===BillingCycle.YEARLY?priceTable.yearlyBillingTypes:priceTable.monthlyBillingTypes
+      :[];
+    if(dto.allowedBillingTypes!==undefined&&!dto.allowedBillingTypes.length){
+      throw new BadRequestException('Selecione ao menos uma forma de pagamento.');
+    }
+    const preferTableBilling=Boolean(
+      priceTable&&(customerTypeChanged||dto.priceTableVersionId!==undefined||dto.cycle!==undefined),
+    );
+    const fallbackBillingType=dto.billingType||opp.billingType||null;
+    const allowedBillingTypes=dto.allowedBillingTypes!==undefined
+      ?dto.allowedBillingTypes
+      :preferTableBilling&&tableAllowed.length
+        ?tableAllowed
+        :existingAllowed.length
+          ?existingAllowed
+          :tableAllowed.length
+            ?tableAllowed
+            :fallbackBillingType
+              ?[fallbackBillingType]
+              :[];
+    const preferredBillingType=dto.billingType||opp.billingType||null;
+    const billingType=preferredBillingType&&allowedBillingTypes.includes(preferredBillingType)
+      ?preferredBillingType
+      :allowedBillingTypes[0]||null;
+
+    const pricingInputsChanged=dto.negotiation!==undefined
+      ||dto.cycle!==undefined
+      ||dto.priceTableVersionId!==undefined
+      ||dto.billingType!==undefined
+      ||dto.allowedBillingTypes!==undefined
+      ||customerTypeChanged;
+    if(pricingInputsChanged){
+      const useTableDefaults=customerTypeChanged||dto.priceTableVersionId!==undefined;
+      const negotiation=dto.negotiation
+        ||(useTableDefaults?this.negotiationFromPriceTable(priceTable,effectiveCustomerType):null)
+        ||this.negotiationFromSnapshot(opp.negotiationSnapshot,effectiveCustomerType)
+        ||this.negotiationFromPriceTable(priceTable,effectiveCustomerType);
+      if(!negotiation)throw new BadRequestException('Informe os valores da negociação.');
+      this.validatePaymentRules(effectiveCustomerType,effectiveCycle,allowedBillingTypes,billingType);
+      const calculation=this.pricing.calculate({
+        ...negotiation,
+        customerType:effectiveCustomerType,
+        cycle:effectiveCycle,
+        billingType:billingType||undefined,
+        annualDiscountPercent:priceTable
+          ?Number(priceTable.annualDiscountPercent||0)
+          :Number(
+              negotiation.annualDiscountPercent
+              ??opp.negotiationSnapshot?.pricing?.annualDiscountPercent
+              ??0,
+            ),
+      } as any);
+      this.validatePriceTableParticipants(priceTable,calculation);
+      const preservePreviousTable=!customerTypeChanged&&dto.priceTableVersionId===undefined;
+      const snapshot={
+        ...calculation,
+        allowedBillingTypes,
+        limits:priceTable?{
+          maxDependents:priceTable.maxDependents,
+          minLives:priceTable.minLives,
+          maxLives:priceTable.maxLives,
+        }:preservePreviousTable?opp.negotiationSnapshot?.limits:undefined,
+        priceTable:priceTable?{
+          id:priceTable.id,
+          version:priceTable.version,
+          customerType:priceTable.customerType,
+        }:preservePreviousTable?opp.negotiationSnapshot?.priceTable:undefined,
+        contractTemplateVersionId,
+        source:priceTable
+          ?'DEFAULT_PRICE_TABLE'
+          :preservePreviousTable
+            ?opp.negotiationSnapshot?.source||'MANUAL_NEGOTIATION'
+            :'MANUAL_NEGOTIATION',
+      };
+      const negotiationChanged=this.canonical(this.approvalTerms(opp.negotiationSnapshot||{}))
+        !==this.canonical(this.approvalTerms(snapshot));
       opp.negotiationSnapshot=snapshot;
       opp.expectedValue=Number(snapshot.pricing.finalAmount).toFixed(2);
+      opp.billingCycle=effectiveCycle;
+      opp.billingType=billingType;
+      if(negotiationChanged||opp.commercialStatus===CommercialStatus.DRAFT){
+        opp.commercialStatus=CommercialStatus.NEGOTIATION;
+      }
+    }else if(contractChanged){
+      const snapshot={
+        ...(opp.negotiationSnapshot||{}),
+        contractTemplateVersionId,
+      };
+      const negotiationChanged=this.canonical(this.approvalTerms(opp.negotiationSnapshot||{}))
+        !==this.canonical(this.approvalTerms(snapshot));
+      opp.negotiationSnapshot=snapshot;
       if(negotiationChanged||opp.commercialStatus===CommercialStatus.DRAFT){
         opp.commercialStatus=CommercialStatus.NEGOTIATION;
       }
     }
-    await this.personRepo.save(person);await this.repo.save(opp);return this.detail(unitId,id,userId,unitRole,globalRole)}
+
+    await this.personRepo.save(person);
+    await this.repo.save(opp);
+    return this.detail(unitId,id,userId,unitRole,globalRole);
+  }
 
   async assign(
     unitId:string,
@@ -279,9 +529,6 @@ export class OpportunitiesService {
     }
 
     const opp = await this.getEntity(unitId, id, user.id, unitRole, user.globalRole);
-    if (opp.customerType === CustomerType.COMPANY && opp.commercialStatus !== CommercialStatus.APPROVED) {
-      throw new BadRequestException('Negociação de pessoa jurídica precisa estar aprovada antes do checkout.');
-    }
 
     const detail = await this.detail(unitId, id);
     const pending = this.pending(detail);
@@ -534,12 +781,28 @@ export class OpportunitiesService {
     if(opportunity.teamId)return'TEAM_QUEUE';
     return'UNASSIGNED';
   }
-  private validatePersonPaymentRules(customerType:CustomerType,cycle:BillingCycle|null|undefined,allowedBillingTypes:BillingType[],billingType:BillingType|null|undefined){
-    if(customerType!==CustomerType.PERSON||!cycle)return;
+  private validatePaymentRules(
+    customerType:CustomerType,
+    cycle:BillingCycle|null|undefined,
+    allowedBillingTypes:BillingType[],
+    billingType:BillingType|null|undefined,
+  ){
+    if(!cycle)return;
+    const allowed:BillingType[]=[...new Set<BillingType>(
+      allowedBillingTypes.filter(type=>type!==BillingType.UNDEFINED),
+    )];
+    if(customerType===CustomerType.COMPANY){
+      if(cycle!==BillingCycle.MONTHLY){
+        throw new BadRequestException('Pessoa jurídica utiliza somente cobrança mensal.');
+      }
+      if(billingType&&allowed.length&&!allowed.includes(billingType)){
+        throw new BadRequestException('A forma principal de pagamento precisa estar entre as formas permitidas.');
+      }
+      return;
+    }
     if(![BillingCycle.MONTHLY,BillingCycle.YEARLY].includes(cycle)){
       throw new BadRequestException('Pessoa física deve utilizar periodicidade mensal ou anual.');
     }
-    const allowed: BillingType[] = [...new Set<BillingType>(allowedBillingTypes.filter(type => type !== BillingType.UNDEFINED))];
     if(!allowed.includes(BillingType.CREDIT_CARD)){
       throw new BadRequestException('Cartão de crédito deve estar disponível para pessoa física.');
     }
@@ -554,10 +817,144 @@ export class OpportunitiesService {
     }
   }
 
-  private personDto(d:any){return{kind:'PERSON' as any,name:d.nome,taxId:d.cpfCnpj||undefined,email:d.email||undefined,phone:d.telefone||undefined,whatsapp:d.telefone||undefined,birthDate:d.dataNascimento||undefined,address:d.endereco||undefined,addressNumber:d.enderecoNumero||undefined,complement:d.complemento||undefined,district:d.bairro||undefined,city:d.cidade||undefined,state:d.estado||undefined,postalCode:d.cep||undefined,metadata:{}}}
+  private async resolvePriceTable(
+    unitId:string,
+    customerType:CustomerType,
+    requestedVersionId?:string,
+    allowHistorical=false,
+  ){
+    if(requestedVersionId){
+      const selected=await this.priceTableRepo.findOne({where:{unitId,id:requestedVersionId}});
+      if(!selected||selected.customerType!==customerType){
+        throw new BadRequestException('A tabela de preços selecionada não é compatível com o cliente.');
+      }
+      if(selected.status!==CommercialPriceTableVersionStatus.PUBLISHED
+        &&!(allowHistorical&&selected.status===CommercialPriceTableVersionStatus.RETIRED)){
+        throw new BadRequestException('A tabela de preços selecionada não está vigente.');
+      }
+      return selected;
+    }
+    const today=new Date().toISOString().slice(0,10);
+    const versions=await this.priceTableRepo.find({
+      where:{unitId,customerType,status:CommercialPriceTableVersionStatus.PUBLISHED},
+      order:{version:'DESC'},
+    });
+    return versions.find(version=>
+      (!version.effectiveFrom||version.effectiveFrom<=today)
+      &&(!version.effectiveTo||version.effectiveTo>=today),
+    )||null;
+  }
+
+  private validatePriceTableParticipants(
+    table:CommercialPriceTableVersion|null,
+    calculation:Record<string,any>,
+  ){
+    if(!table)return;
+    if(table.customerType===CustomerType.PERSON){
+      const dependents=Number(calculation?.participants?.dependentCount||0);
+      if(dependents>Number(table.maxDependents||0)){
+        throw new BadRequestException(`A tabela selecionada permite no máximo ${table.maxDependents} dependente(s).`);
+      }
+      return;
+    }
+    const lives=Number(calculation?.participants?.contractedLives||0);
+    if(lives<Number(table.minLives||1)){
+      throw new BadRequestException(`A tabela selecionada exige no mínimo ${table.minLives||1} vida(s).`);
+    }
+    if(table.maxLives!=null&&lives>Number(table.maxLives)){
+      throw new BadRequestException(`A tabela selecionada permite no máximo ${table.maxLives} vida(s).`);
+    }
+  }
+
+  private negotiationFromPriceTable(
+    table:CommercialPriceTableVersion|null,
+    customerType:CustomerType,
+  ){
+    if(!table)return null;
+    if(customerType===CustomerType.COMPANY){
+      return {
+        baseAmount:Number(table.unitPrice||0),
+        unitPrice:Number(table.unitPrice||0),
+        lives:Math.max(1,table.minLives||1),
+        discounts:[],
+      };
+    }
+    return {
+      baseAmount:Number(table.holderAmount||0),
+      dependentAmount:Number(table.dependentAmount||0),
+      dependentCount:0,
+      annualDiscountPercent:Number(table.annualDiscountPercent||0),
+      discounts:[],
+    };
+  }
+
+  private negotiationFromSnapshot(
+    snapshot:Record<string,any>|null|undefined,
+    customerType:CustomerType,
+  ){
+    if(!snapshot?.pricing)return null;
+    if(customerType===CustomerType.COMPANY){
+      const unitPrice=Number(snapshot.pricing.unitPrice??0);
+      return {
+        baseAmount:unitPrice,
+        unitPrice,
+        lives:Math.max(1,Number(snapshot.participants?.contractedLives??1)),
+        discounts:Array.isArray(snapshot.discounts)?snapshot.discounts:[],
+      };
+    }
+    return {
+      baseAmount:Number(snapshot.pricing.holderAmount??snapshot.pricing.baseAmount??0),
+      dependentAmount:Number(snapshot.pricing.dependentAmount??0),
+      dependentCount:Math.max(0,Number(snapshot.participants?.dependentCount??0)),
+      annualDiscountPercent:Number(snapshot.pricing.annualDiscountPercent??0),
+      discounts:Array.isArray(snapshot.discounts)?snapshot.discounts:[],
+    };
+  }
+
+  private async assertContractTemplate(
+    unitId:string,
+    versionId:string,
+    customerType:CustomerType,
+  ){
+    const version=await this.contractTemplateVersionRepo.findOne({where:{unitId,id:versionId}});
+    if(!version||version.status!==ContractTemplateStatus.PUBLISHED){
+      throw new BadRequestException('A versão contratual selecionada não está publicada.');
+    }
+    const template=await this.contractTemplateRepo.findOne({
+      where:{unitId,id:version.templateId,active:true},
+    });
+    if(!template||template.customerType!==customerType){
+      throw new BadRequestException('O modelo contratual não é compatível com o tipo de cliente.');
+    }
+    return version;
+  }
+
+  private approvalTerms(snapshot:any){
+    return {
+      customerType:snapshot?.customerType||null,
+      cycle:snapshot?.cycle||null,
+      billingType:snapshot?.billingType||null,
+      allowedBillingTypes:[...(snapshot?.allowedBillingTypes||[])].sort(),
+      participants:snapshot?.participants||null,
+      pricing:snapshot?.pricing?{
+        holderAmount:snapshot.pricing.holderAmount,
+        dependentAmount:snapshot.pricing.dependentAmount,
+        unitPrice:snapshot.pricing.unitPrice,
+        grossPeriodAmount:snapshot.pricing.grossPeriodAmount,
+        annualDiscountPercent:snapshot.pricing.annualDiscountPercent,
+        negotiationBaseAmount:snapshot.pricing.negotiationBaseAmount,
+        commercialDiscountAmount:snapshot.pricing.commercialDiscountAmount,
+        finalAmount:snapshot.pricing.finalAmount,
+      }:null,
+      discounts:snapshot?.discounts||[],
+      contractTemplateVersionId:snapshot?.contractTemplateVersionId||null,
+    };
+  }
+
+  private personDto(d:any,customerType:CustomerType=CustomerType.PERSON){return{kind:customerType===CustomerType.COMPANY?PersonKind.COMPANY:PersonKind.PERSON,name:d.nome,taxId:d.cpfCnpj||undefined,email:d.email||undefined,phone:d.telefone||undefined,whatsapp:d.telefone||undefined,birthDate:d.dataNascimento||undefined,address:d.endereco||undefined,addressNumber:d.enderecoNumero||undefined,complement:d.complemento||undefined,district:d.bairro||undefined,city:d.cidade||undefined,state:d.estado||undefined,postalCode:d.cep||undefined,metadata:{}}}
   private canonical(value:any):string{if(Array.isArray(value))return`[${value.map(item=>this.canonical(item)).join(',')}]`;if(value&&typeof value==='object')return`{${Object.keys(value).sort().map(key=>`${JSON.stringify(key)}:${this.canonical(value[key])}`).join(',')}}`;return JSON.stringify(value)}
 
-  private serialize(o:Opportunity,p:Person){return{id:o.id,ownerUserId:o.ownerUserId,teamId:o.teamId,assignmentMode:this.assignmentMode(o),pipelineStageId:o.pipelineStageId,offerVersionId:o.offerVersionId,customerType:o.customerType,commercialStatus:o.commercialStatus,negotiationSnapshot:o.negotiationSnapshot,nome:p?.name||'',cpfCnpj:p?.taxId||'',telefone:p?.phone||'',email:p?.email||'',dataNascimento:p?.birthDate||'',endereco:p?.address||'',enderecoNumero:p?.addressNumber||'',complemento:p?.complement||'',bairro:p?.district||'',cidade:p?.city||'',estado:p?.state||'',cep:p?.postalCode||'',valor:Number(o.expectedValue||0),billingType:o.billingType,cycle:o.billingCycle,status:this.toLegacyStatus(o.status),motivoCancelamento:o.lossReason,createdAt:o.createdAt,convertedAt:o.wonAt,asaasCustomerId:o.asaasCustomerId}}
+  private serialize(o:Opportunity,p:Person){return{id:o.id,ownerUserId:o.ownerUserId,teamId:o.teamId,assignmentMode:this.assignmentMode(o),pipelineStageId:o.pipelineStageId,offerVersionId:o.offerVersionId,priceTableVersionId:o.priceTableVersionId,contractTemplateVersionId:o.contractTemplateVersionId,customerType:o.customerType,commercialStatus:o.commercialStatus,negotiationSnapshot:o.negotiationSnapshot,nome:p?.name||'',cpfCnpj:p?.taxId||'',telefone:p?.phone||'',email:p?.email||'',dataNascimento:p?.birthDate||'',endereco:p?.address||'',enderecoNumero:p?.addressNumber||'',complemento:p?.complement||'',bairro:p?.district||'',cidade:p?.city||'',estado:p?.state||'',cep:p?.postalCode||'',valor:Number(o.expectedValue||0),billingType:o.billingType,cycle:o.billingCycle,status:this.toLegacyStatus(o.status),motivoCancelamento:o.lossReason,createdAt:o.createdAt,convertedAt:o.wonAt,asaasCustomerId:o.asaasCustomerId}}
   private pending(d:any){return REQUIRED.filter(k=>d[k]===null||d[k]===undefined||d[k]==='')}
   private toLegacyStatus(s:OpportunityStatus){return({[OpportunityStatus.OPEN]:'aberta',[OpportunityStatus.CHECKOUT_PENDING]:'checkout_gerado',[OpportunityStatus.PAID]:'checkout_pago',[OpportunityStatus.WON]:'convertida',[OpportunityStatus.LOST]:'cancelada',[OpportunityStatus.CANCELLED]:'cancelada',[OpportunityStatus.EXPIRED]:'checkout_expirado'}as any)[s]}
   private fromLegacyStatus(s:string){return({aberta:OpportunityStatus.OPEN,checkout_gerado:OpportunityStatus.CHECKOUT_PENDING,checkout_pago:OpportunityStatus.PAID,convertida:OpportunityStatus.WON,cancelada:OpportunityStatus.CANCELLED,checkout_expirado:OpportunityStatus.EXPIRED}as any)[s]||s}

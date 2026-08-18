@@ -22,6 +22,7 @@ export enum ContractRelationType { ORIGINAL = 'ORIGINAL', AMENDMENT = 'AMENDMENT
 export enum PrecheckoutStatus { CREATED = 'CREATED', DATA_COMPLETED = 'DATA_COMPLETED', CONTRACT_READY = 'CONTRACT_READY', ACCEPTED = 'ACCEPTED', PAYMENT_PENDING = 'PAYMENT_PENDING', COMPLETED = 'COMPLETED', EXPIRED = 'EXPIRED', CANCELLED = 'CANCELLED', FAILED = 'FAILED', REVOKED = 'REVOKED' }
 export enum CommercialOfferStatus { DRAFT = 'DRAFT', PUBLISHED = 'PUBLISHED', ARCHIVED = 'ARCHIVED' }
 export enum CommercialOfferVersionStatus { DRAFT = 'DRAFT', PUBLISHED = 'PUBLISHED', RETIRED = 'RETIRED' }
+export enum CommercialPriceTableVersionStatus { DRAFT = 'DRAFT', PUBLISHED = 'PUBLISHED', RETIRED = 'RETIRED' }
 export enum ContractTemplateStatus { DRAFT = 'DRAFT', PUBLISHED = 'PUBLISHED', RETIRED = 'RETIRED' }
 export enum OpportunityStatus { OPEN = 'OPEN', CHECKOUT_PENDING = 'CHECKOUT_PENDING', PAID = 'PAID', WON = 'WON', LOST = 'LOST', CANCELLED = 'CANCELLED', EXPIRED = 'EXPIRED' }
 export enum MemberRole { PRIMARY = 'PRIMARY', DEPENDENT = 'DEPENDENT' }
@@ -187,6 +188,8 @@ export class Opportunity extends UnitScopedEntity {
   @Column({ name: 'team_id', type: 'uuid', nullable: true }) teamId: string | null;
   @Column({ name: 'pipeline_stage_id', type: 'uuid', nullable: true }) pipelineStageId: string | null;
   @Column({ name: 'offer_version_id', type: 'uuid', nullable: true }) offerVersionId: string | null;
+  @Column({ name: 'price_table_version_id', type: 'uuid', nullable: true }) priceTableVersionId: string | null;
+  @Column({ name: 'contract_template_version_id', type: 'uuid', nullable: true }) contractTemplateVersionId: string | null;
   @Column({ name: 'customer_type', type: 'varchar', length: 20, default: CustomerType.PERSON }) customerType: CustomerType;
   @Column({ name: 'commercial_status', type: 'varchar', length: 30, default: CommercialStatus.DRAFT }) commercialStatus: CommercialStatus;
   @Column({ name: 'negotiation_snapshot', type: 'jsonb', default: () => "'{}'::jsonb" }) negotiationSnapshot: Record<string, any>;
@@ -423,6 +426,43 @@ export class CommercialOfferVersion extends UnitScopedEntity {
   @Column({ type: 'jsonb', default: () => "'{}'::jsonb" }) metadata: Record<string, any>;
 }
 
+
+@Entity('commercial_offer_billing_options')
+@Index(['unitId', 'offerVersionId', 'billingCycle'], { unique: true })
+export class CommercialOfferBillingOption extends UnitScopedEntity {
+  @Column({ name: 'offer_version_id', type: 'uuid' }) offerVersionId: string;
+  @Column({ name: 'billing_cycle', type: 'varchar', length: 30 }) billingCycle: BillingCycle;
+  @Column({ name: 'holder_amount', type: 'numeric', precision: 14, scale: 2, nullable: true }) holderAmount: string | null;
+  @Column({ name: 'dependent_amount', type: 'numeric', precision: 14, scale: 2, nullable: true }) dependentAmount: string | null;
+  @Column({ name: 'unit_price', type: 'numeric', precision: 14, scale: 2, nullable: true }) unitPrice: string | null;
+  @Column({ name: 'annual_discount_percent', type: 'numeric', precision: 6, scale: 2, default: 0 }) annualDiscountPercent: string;
+  @Column({ name: 'allowed_billing_types', type: 'jsonb', default: () => "'[]'::jsonb" }) allowedBillingTypes: BillingType[];
+  @Column({ name: 'pricing_rules', type: 'jsonb', default: () => "'{}'::jsonb" }) pricingRules: Record<string, any>;
+}
+
+@Entity('commercial_price_table_versions')
+@Index(['unitId', 'customerType', 'version'], { unique: true })
+@Index('UQ_commercial_price_table_versions_current', ['unitId', 'customerType'], { unique: true, where: "\"status\" = 'PUBLISHED'" })
+export class CommercialPriceTableVersion extends UnitScopedEntity {
+  @Column({ name: 'customer_type', type: 'varchar', length: 20 }) customerType: CustomerType;
+  @Column({ type: 'int' }) version: number;
+  @Column({ type: 'varchar', length: 30, default: CommercialPriceTableVersionStatus.DRAFT }) status: CommercialPriceTableVersionStatus;
+  @Column({ name: 'holder_amount', type: 'numeric', precision: 14, scale: 2, nullable: true }) holderAmount: string | null;
+  @Column({ name: 'dependent_amount', type: 'numeric', precision: 14, scale: 2, nullable: true }) dependentAmount: string | null;
+  @Column({ name: 'unit_price', type: 'numeric', precision: 14, scale: 2, nullable: true }) unitPrice: string | null;
+  @Column({ name: 'annual_discount_percent', type: 'numeric', precision: 6, scale: 2, default: 0 }) annualDiscountPercent: string;
+  @Column({ name: 'max_dependents', type: 'int', default: 0 }) maxDependents: number;
+  @Column({ name: 'min_lives', type: 'int', default: 1 }) minLives: number;
+  @Column({ name: 'max_lives', type: 'int', nullable: true }) maxLives: number | null;
+  @Column({ name: 'monthly_billing_types', type: 'jsonb', default: () => "'[]'::jsonb" }) monthlyBillingTypes: BillingType[];
+  @Column({ name: 'yearly_billing_types', type: 'jsonb', default: () => "'[]'::jsonb" }) yearlyBillingTypes: BillingType[];
+  @Column({ name: 'contract_template_version_id', type: 'uuid', nullable: true }) contractTemplateVersionId: string | null;
+  @Column({ name: 'effective_from', type: 'date', nullable: true }) effectiveFrom: string | null;
+  @Column({ name: 'effective_to', type: 'date', nullable: true }) effectiveTo: string | null;
+  @Column({ name: 'published_at', type: 'timestamptz', nullable: true }) publishedAt: Date | null;
+  @Column({ type: 'jsonb', default: () => "'{}'::jsonb" }) metadata: Record<string, any>;
+}
+
 @Entity('commercial_pipelines')
 @Index(['unitId', 'name'], { unique: true })
 export class CommercialPipeline extends UnitScopedEntity {
@@ -449,6 +489,7 @@ export class NegotiationPolicy extends UnitScopedEntity {
   @Column({ name: 'customer_type', type: 'varchar', length: 30, nullable: true }) customerType: CustomerType | null;
   @Column({ name: 'target_role', type: 'varchar', length: 40, nullable: true }) targetRole: UnitRole | null;
   @Column({ name: 'target_user_id', type: 'uuid', nullable: true }) targetUserId: string | null;
+  @Column({ name: 'target_team_id', type: 'uuid', nullable: true }) targetTeamId: string | null;
   @Column({ name: 'max_discount_percent', type: 'numeric', precision: 6, scale: 2, default: 0 }) maxDiscountPercent: string;
   @Column({ name: 'max_discount_amount', type: 'numeric', precision: 14, scale: 2, nullable: true }) maxDiscountAmount: string | null;
   @Column({ name: 'min_unit_price', type: 'numeric', precision: 14, scale: 2, nullable: true }) minUnitPrice: string | null;
@@ -533,6 +574,7 @@ export const ALL_ENTITIES = [
   User, Unit, Membership, RefreshToken, BillingConnection, Person, Plan, PlanPrice,
   Team, TeamMember, Opportunity, OpportunityMember, BillingCustomer, CheckoutSession,
   Subscription, SubscriptionMember, Invoice, Payment, Sale, WebhookEvent, LifecycleEvent, AuditLog,
-  CommercialOffer, CommercialOfferVersion, CommercialPipeline, CommercialPipelineStage, ContractTemplate, ContractTemplateVersion,
+  CommercialOffer, CommercialOfferVersion, CommercialOfferBillingOption, CommercialPriceTableVersion,
+  CommercialPipeline, CommercialPipelineStage, ContractTemplate, ContractTemplateVersion,
   NegotiationPolicy, ApprovalRequest, Contract, ContractAcceptance, PrecheckoutSession, PrecheckoutParticipant,
 ];

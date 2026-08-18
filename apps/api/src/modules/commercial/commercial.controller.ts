@@ -10,11 +10,12 @@ import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { PermissionsGuard } from '../../common/guards/permissions.guard';
 import { UnitAccessGuard } from '../../common/guards/unit-access.guard';
 import { PERMISSIONS } from '../../common/utils/permissions';
-import { Membership, User } from '../../database/entities';
+import { CustomerType, Membership, User } from '../../database/entities';
 import {
   AcceptContractDto,
   CreateCommercialOfferDto,
   CreateCommercialOfferVersionDto,
+  CreateCommercialPriceTableVersionDto,
   CreateCommercialPipelineDto,
   CreateCommercialPipelineStageDto,
   CreateContractRevisionDto,
@@ -255,6 +256,58 @@ export class CommercialController {
     @Param('versionId') versionId: string,
   ) {
     return this.config.publishOfferVersion(unitId, id, versionId);
+  }
+
+
+  @Get('price-tables')
+  @RequirePermissions(PERMISSIONS.COMMERCIAL_CONFIG_MANAGE)
+  priceTables(@CurrentUnitId() unitId: string) {
+    return this.config.listPriceTableVersions(unitId);
+  }
+
+  @Get('price-tables/current')
+  @RequirePermissions(PERMISSIONS.NEGOTIATIONS_EDIT)
+  currentPriceTable(
+    @CurrentUnitId() unitId: string,
+    @Query('customerType') customerType: CustomerType,
+  ) {
+    return this.config.currentPriceTable(unitId, customerType);
+  }
+
+  @Get('price-tables/versions/:versionId')
+  @RequirePermissions(PERMISSIONS.NEGOTIATIONS_EDIT)
+  priceTableVersion(
+    @CurrentUnitId() unitId: string,
+    @Param('versionId') versionId: string,
+  ) {
+    return this.config.priceTableVersion(unitId, versionId);
+  }
+
+  @Post('price-tables/versions')
+  @RequirePermissions(PERMISSIONS.COMMERCIAL_CONFIG_MANAGE)
+  createPriceTableVersion(
+    @CurrentUnitId() unitId: string,
+    @Body() dto: CreateCommercialPriceTableVersionDto,
+  ) {
+    return this.config.createPriceTableVersion(unitId, dto);
+  }
+
+  @Post('price-tables/versions/:versionId/publish')
+  @RequirePermissions(PERMISSIONS.COMMERCIAL_CONFIG_MANAGE)
+  publishPriceTableVersion(
+    @CurrentUnitId() unitId: string,
+    @Param('versionId') versionId: string,
+  ) {
+    return this.config.publishPriceTableVersion(unitId, versionId);
+  }
+
+  @Get('contract-template-options')
+  @RequirePermissions(PERMISSIONS.NEGOTIATIONS_EDIT)
+  contractTemplateOptions(
+    @CurrentUnitId() unitId: string,
+    @Query('customerType') customerType?: CustomerType,
+  ) {
+    return this.config.publishedTemplateOptions(unitId, customerType);
   }
 
   @Get('pipelines')

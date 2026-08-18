@@ -21,6 +21,8 @@ export class CreateOpportunityDto {
   @IsOptional() @IsArray() @IsEnum(BillingType, { each: true }) allowedBillingTypes?: BillingType[];
   @IsOptional() @IsEnum(BillingCycle) cycle?: BillingCycle;
   @EmptyToUndefined() @IsOptional() @IsUUID() planPriceId?: string;
+  @EmptyToUndefined() @IsOptional() @IsUUID() priceTableVersionId?: string;
+  @EmptyToUndefined() @IsOptional() @IsUUID() contractTemplateVersionId?: string;
   @IsOptional() @IsString() acquisitionSource?: string;
   @IsOptional() @IsString() notes?: string;
   @IsOptional() @IsEnum(CustomerType) customerType?: CustomerType;

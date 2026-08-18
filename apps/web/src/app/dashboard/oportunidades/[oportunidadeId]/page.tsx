@@ -78,6 +78,7 @@ export default function OportunidadeDetailPage() {
       setOpp(res);
       setDependentes(res.dependentes || []);
       setForm({
+        customerType: res.customerType || 'PERSON',
         nome: res.nome || '',
         cpfCnpj: res.cpfCnpj || '',
         email: res.email || '',
@@ -217,14 +218,34 @@ export default function OportunidadeDetailPage() {
       <div>
         <span className="text-xs text-ink-tertiary">{label}</span>
         {editing ? (
-          type === 'select' ? (
+          key === 'customerType' ? (
+            <select
+              className="mt-0.5 w-full rounded-lg border border-edge bg-surface-input px-3 py-1.5 text-sm text-ink focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/20"
+              value={val || 'PERSON'}
+              onChange={(e) => setForm({
+                ...form,
+                customerType: e.target.value,
+                cpfCnpj: '',
+                dataNascimento: e.target.value === 'COMPANY' ? '' : form.dataNascimento,
+                cycle: e.target.value === 'COMPANY' ? 'MONTHLY' : (form.cycle || 'MONTHLY'),
+              })}
+            >
+              <option value="PERSON">Pessoa física</option>
+              <option value="COMPANY">Pessoa jurídica</option>
+            </select>
+          ) : type === 'select' ? (
             <select
               className="mt-0.5 w-full rounded-lg border border-edge bg-surface-input px-3 py-1.5 text-sm text-ink focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/20"
               value={val || ''}
               onChange={(e) => setForm({ ...form, [key]: e.target.value })}
             >
               <option value="">Selecionar</option>
-              {(key === 'billingType' ? billingTypeOptions : cycleOptions).map((opt) => (
+              {(key === 'billingType'
+                ? billingTypeOptions
+                : form.customerType === 'COMPANY'
+                  ? cycleOptions.filter((opt) => opt.value === 'MONTHLY')
+                  : cycleOptions.filter((opt) => ['MONTHLY', 'YEARLY'].includes(opt.value))
+              ).map((opt) => (
                 <option key={opt.value} value={opt.value}>{opt.label}</option>
               ))}
             </select>
@@ -289,6 +310,7 @@ export default function OportunidadeDetailPage() {
         ) : (
           <p className="text-sm text-ink">
             {type === 'currency' ? fmtBRL(Number(val)) :
+             key === 'customerType' ? (val === 'COMPANY' ? 'Pessoa jurídica' : 'Pessoa física') :
              key === 'cpfCnpj' ? formatCpfCnpj(val) :
              key === 'telefone' ? formatPhone(val) :
              key === 'cep' ? formatCep(val) :
@@ -438,8 +460,9 @@ export default function OportunidadeDetailPage() {
           <div className="mb-8 rounded-xl border border-edge bg-surface-elevated p-6 shadow-sm">
             <h2 className="mb-4 text-lg font-semibold text-ink">Cadastro da oportunidade</h2>
             <div className="grid grid-cols-1 gap-x-8 gap-y-3 sm:grid-cols-2 lg:grid-cols-3">
-              {renderField('Nome', 'nome')}
-              {renderField('CPF/CNPJ', 'cpfCnpj')}
+              {renderField('Tipo de cliente', 'customerType')}
+              {renderField(form.customerType === 'COMPANY' ? 'Razão social ou nome fantasia' : 'Nome completo', 'nome')}
+              {renderField(form.customerType === 'COMPANY' ? 'CNPJ' : 'CPF', 'cpfCnpj')}
               {renderField('Telefone', 'telefone')}
               {renderField('Email', 'email')}
               {renderField('Data de Nascimento', 'dataNascimento', 'date')}
@@ -545,6 +568,7 @@ export default function OportunidadeDetailPage() {
             </div>
           )}
 
+          {opp?.customerType !== 'COMPANY' && (
           <div className="rounded-xl border border-edge bg-surface-elevated p-6 shadow-sm">
             <div className="mb-3 flex items-center justify-between">
               <h3 className="text-sm font-medium text-ink-secondary">Dependentes</h3>
@@ -628,6 +652,7 @@ export default function OportunidadeDetailPage() {
               </div>
             )}
           </div>
+          )}
         </>
       )}
     </div>

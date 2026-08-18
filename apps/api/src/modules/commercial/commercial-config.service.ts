@@ -5,9 +5,12 @@ import {
   BillingCycle,
   BillingType,
   CommercialOffer,
+  CommercialOfferBillingOption,
   CommercialOfferStatus,
   CommercialOfferVersion,
   CommercialOfferVersionStatus,
+  CommercialPriceTableVersion,
+  CommercialPriceTableVersionStatus,
   CommercialPipeline,
   CommercialPipelineStage,
   CommercialStatus,
@@ -30,6 +33,8 @@ import { PeopleService } from '../people/people.service';
 import {
   CreateCommercialOfferDto,
   CreateCommercialOfferVersionDto,
+  CreateCommercialPriceTableVersionDto,
+  CommercialOfferBillingOptionDto,
   CreateCommercialPipelineDto,
   CreateCommercialPipelineStageDto,
   CreateContractTemplateDto,
@@ -46,6 +51,8 @@ export class CommercialConfigService {
   constructor(
     @InjectRepository(CommercialOffer) private readonly offers: Repository<CommercialOffer>,
     @InjectRepository(CommercialOfferVersion) private readonly offerVersions: Repository<CommercialOfferVersion>,
+    @InjectRepository(CommercialOfferBillingOption) private readonly offerBillingOptions: Repository<CommercialOfferBillingOption>,
+    @InjectRepository(CommercialPriceTableVersion) private readonly priceTableVersions: Repository<CommercialPriceTableVersion>,
     @InjectRepository(CommercialPipeline) private readonly pipelines: Repository<CommercialPipeline>,
     @InjectRepository(CommercialPipelineStage) private readonly stages: Repository<CommercialPipelineStage>,
     @InjectRepository(ContractTemplate) private readonly templates: Repository<ContractTemplate>,
@@ -66,9 +73,20 @@ export class CommercialConfigService {
     const versions = offers.length
       ? await this.offerVersions.find({ where: { unitId, offerId: In(offers.map((offer) => offer.id)) }, order: { version: 'DESC' } })
       : [];
+    const options = versions.length
+      ? await this.offerBillingOptions.find({
+          where: { unitId, offerVersionId: In(versions.map((version) => version.id)) },
+          order: { billingCycle: 'ASC' },
+        })
+      : [];
     return offers.map((offer) => ({
       ...offer,
-      versions: versions.filter((version) => version.offerId === offer.id),
+      versions: versions
+        .filter((version) => version.offerId === offer.id)
+        .map((version) => ({
+          ...version,
+          billingOptions: options.filter((option) => option.offerVersionId === version.id),
+        })),
     }));
   }
 
@@ -82,6 +100,9 @@ export class CommercialConfigService {
     const publicSlug = dto.publicSlug?.trim()
       ? this.normalizeSlug(dto.publicSlug)
       : dto.publicSlug === '' ? null : current?.publicSlug || null;
+    if (dto.publicSlug?.trim() && !publicSlug) {
+      throw new BadRequestException('Informe um endereço público com letras ou números.');
+    }
 
     const duplicate = await this.offers.findOne({ where: { unitId, code } });
     if (duplicate && duplicate.id !== id) throw new ConflictException('Já existe uma oferta com este código.');
@@ -153,42 +174,84 @@ export class CommercialConfigService {
 
   async createOfferVersion(unitId: string, offerId: string, dto: CreateCommercialOfferVersionDto) {
     const offer = await this.offer(unitId, offerId);
-    this.validateOfferVersion(offer.customerType, dto);
+    const billingOptions = this.normalizeOfferBillingOptions(offer.customerType, dto);
+    this.validateOfferVersion(offer.customerType, dto, billingOptions);
     if (dto.contractTemplateVersionId) {
       await this.assertPublishedTemplateVersion(unitId, dto.contractTemplateVersionId, offer.customerType);
     }
     const latest = await this.offerVersions.findOne({ where: { unitId, offerId }, order: { version: 'DESC' } });
-    return this.offerVersions.save(this.offerVersions.create({
-      unitId,
-      offerId,
-      version: (latest?.version || 0) + 1,
-      status: CommercialOfferVersionStatus.DRAFT,
-      billingCycle: dto.billingCycle,
-      holderAmount: dto.holderAmount == null ? null : dto.holderAmount.toFixed(2),
-      dependentAmount: dto.dependentAmount == null ? null : dto.dependentAmount.toFixed(2),
-      unitPrice: dto.unitPrice == null ? null : dto.unitPrice.toFixed(2),
-      includedLives: dto.includedLives || 1,
-      maxDependents: dto.maxDependents || 0,
-      minLives: dto.minLives || 1,
-      maxLives: dto.maxLives || null,
-      allowedBillingTypes: dto.allowedBillingTypes,
-      pricingRules: dto.pricingRules || {},
-      contractTemplateVersionId: dto.contractTemplateVersionId || null,
-      effectiveFrom: dto.effectiveFrom || null,
-      effectiveTo: dto.effectiveTo || null,
-      publishedAt: null,
-      metadata: dto.metadata || {},
-    }));
+    const primary = billingOptions.find((option) => option.billingCycle === BillingCycle.MONTHLY) || billingOptions[0];
+
+    return this.offerVersions.manager.transaction(async (manager) => {
+      const versionRepository = manager.getRepository(CommercialOfferVersion);
+      const optionRepository = manager.getRepository(CommercialOfferBillingOption);
+      const version = await versionRepository.save(versionRepository.create({
+        unitId,
+        offerId,
+        version: (latest?.version || 0) + 1,
+        status: CommercialOfferVersionStatus.DRAFT,
+        billingCycle: primary.billingCycle,
+        holderAmount: primary.holderAmount == null ? null : Number(primary.holderAmount).toFixed(2),
+        dependentAmount: primary.dependentAmount == null ? null : Number(primary.dependentAmount).toFixed(2),
+        unitPrice: primary.unitPrice == null ? null : Number(primary.unitPrice).toFixed(2),
+        includedLives: dto.includedLives || 1,
+        maxDependents: dto.maxDependents || 0,
+        minLives: dto.minLives || 1,
+        maxLives: dto.maxLives || null,
+        allowedBillingTypes: primary.allowedBillingTypes,
+        pricingRules: primary.pricingRules || {},
+        contractTemplateVersionId: dto.contractTemplateVersionId || null,
+        effectiveFrom: dto.effectiveFrom || null,
+        effectiveTo: dto.effectiveTo || null,
+        publishedAt: null,
+        metadata: dto.metadata || {},
+      }));
+      await optionRepository.save(billingOptions.map((option) => optionRepository.create({
+        unitId,
+        offerVersionId: version.id,
+        billingCycle: option.billingCycle,
+        holderAmount: option.holderAmount == null ? null : Number(option.holderAmount).toFixed(2),
+        dependentAmount: option.dependentAmount == null ? null : Number(option.dependentAmount).toFixed(2),
+        unitPrice: option.unitPrice == null ? null : Number(option.unitPrice).toFixed(2),
+        annualDiscountPercent: Number(option.annualDiscountPercent || 0).toFixed(2),
+        allowedBillingTypes: option.allowedBillingTypes,
+        pricingRules: option.pricingRules || {},
+      })));
+      return {
+        ...version,
+        billingOptions: await optionRepository.find({
+          where: { unitId, offerVersionId: version.id },
+          order: { billingCycle: 'ASC' },
+        }),
+      };
+    });
   }
 
   async publishOfferVersion(unitId: string, offerId: string, versionId: string) {
     const offer = await this.offer(unitId, offerId);
+    if (!offer.publicSlug) {
+      throw new BadRequestException('Defina o endereço público antes de ativar a oferta.');
+    }
     const version = await this.offerVersions.findOne({ where: { unitId, offerId, id: versionId } });
     if (!version) throw new NotFoundException('Versão da oferta não encontrada.');
     if (version.status === CommercialOfferVersionStatus.RETIRED) {
       throw new ConflictException('Uma versão histórica não pode voltar a ser vigente. Crie uma nova versão.');
     }
-    if (!version.allowedBillingTypes.length) throw new BadRequestException('Defina ao menos uma forma de pagamento.');
+    const billingOptions = await this.offerBillingOptions.find({
+      where: { unitId, offerVersionId: version.id },
+    });
+    if (!billingOptions.length || billingOptions.some((option) => !option.allowedBillingTypes.length)) {
+      throw new BadRequestException('Defina ao menos uma opção de cobrança com forma de pagamento.');
+    }
+    this.validateBillingOptions(offer.customerType, billingOptions.map((option) => ({
+      billingCycle: option.billingCycle,
+      holderAmount: option.holderAmount == null ? undefined : Number(option.holderAmount),
+      dependentAmount: option.dependentAmount == null ? undefined : Number(option.dependentAmount),
+      unitPrice: option.unitPrice == null ? undefined : Number(option.unitPrice),
+      annualDiscountPercent: Number(option.annualDiscountPercent || 0),
+      allowedBillingTypes: option.allowedBillingTypes,
+      pricingRules: option.pricingRules,
+    })));
     if (!version.contractTemplateVersionId) {
       throw new BadRequestException('Selecione uma versão contratual publicada antes de publicar a oferta.');
     }
@@ -216,6 +279,157 @@ export class CommercialConfigService {
       offer.active = true;
       await offerRepository.save(offer);
       return versionRepository.save(version);
+    });
+  }
+
+  async listPriceTableVersions(unitId: string) {
+    return this.priceTableVersions.find({
+      where: { unitId },
+      order: { customerType: 'ASC', version: 'DESC' },
+    });
+  }
+
+  async currentPriceTable(unitId: string, customerType: CustomerType) {
+    if (!Object.values(CustomerType).includes(customerType)) {
+      throw new BadRequestException('Informe um tipo de cliente válido.');
+    }
+    const today = new Date().toISOString().slice(0, 10);
+    const versions = await this.priceTableVersions.find({
+      where: {
+        unitId,
+        customerType,
+        status: CommercialPriceTableVersionStatus.PUBLISHED,
+      },
+      order: { version: 'DESC' },
+    });
+    return versions.find((version) =>
+      (!version.effectiveFrom || version.effectiveFrom <= today)
+      && (!version.effectiveTo || version.effectiveTo >= today)) || null;
+  }
+
+  async priceTableVersion(unitId: string, versionId: string) {
+    const version = await this.priceTableVersions.findOne({
+      where: { unitId, id: versionId },
+    });
+    if (!version) throw new NotFoundException('Versão da tabela de preços não encontrada.');
+    return version;
+  }
+
+  async createPriceTableVersion(unitId: string, dto: CreateCommercialPriceTableVersionDto) {
+    this.validatePriceTable(dto);
+    if (dto.contractTemplateVersionId) {
+      await this.assertPublishedTemplateVersion(unitId, dto.contractTemplateVersionId, dto.customerType);
+    }
+    const latest = await this.priceTableVersions.findOne({
+      where: { unitId, customerType: dto.customerType },
+      order: { version: 'DESC' },
+    });
+    return this.priceTableVersions.save(this.priceTableVersions.create({
+      unitId,
+      customerType: dto.customerType,
+      version: (latest?.version || 0) + 1,
+      status: CommercialPriceTableVersionStatus.DRAFT,
+      holderAmount: dto.customerType === CustomerType.PERSON && dto.holderAmount != null
+        ? Number(dto.holderAmount).toFixed(2)
+        : null,
+      dependentAmount: dto.customerType === CustomerType.PERSON && dto.dependentAmount != null
+        ? Number(dto.dependentAmount).toFixed(2)
+        : null,
+      unitPrice: dto.customerType === CustomerType.COMPANY && dto.unitPrice != null
+        ? Number(dto.unitPrice).toFixed(2)
+        : null,
+      annualDiscountPercent: dto.customerType === CustomerType.PERSON
+        ? Number(dto.annualDiscountPercent || 0).toFixed(2)
+        : '0.00',
+      maxDependents: dto.customerType === CustomerType.PERSON ? dto.maxDependents || 0 : 0,
+      minLives: dto.customerType === CustomerType.COMPANY ? dto.minLives || 1 : 1,
+      maxLives: dto.customerType === CustomerType.COMPANY ? dto.maxLives || null : null,
+      monthlyBillingTypes: this.allowedBillingTypes(
+        dto.customerType,
+        BillingCycle.MONTHLY,
+        dto.monthlyBillingTypes,
+        { allowMonthlyBoleto: dto.monthlyBillingTypes.includes(BillingType.BOLETO) },
+      ),
+      yearlyBillingTypes: dto.customerType === CustomerType.PERSON
+        ? this.allowedBillingTypes(
+            dto.customerType,
+            BillingCycle.YEARLY,
+            dto.yearlyBillingTypes || [BillingType.CREDIT_CARD],
+          )
+        : [],
+      contractTemplateVersionId: dto.contractTemplateVersionId || null,
+      effectiveFrom: dto.effectiveFrom || null,
+      effectiveTo: null,
+      publishedAt: null,
+      metadata: dto.metadata || {},
+    }));
+  }
+
+  async publishPriceTableVersion(unitId: string, versionId: string) {
+    const version = await this.priceTableVersions.findOne({ where: { unitId, id: versionId } });
+    if (!version) throw new NotFoundException('Versão da tabela de preços não encontrada.');
+    if (version.status === CommercialPriceTableVersionStatus.RETIRED) {
+      throw new ConflictException('Uma versão histórica não pode voltar a ser vigente. Crie uma nova versão.');
+    }
+    if (!version.contractTemplateVersionId) {
+      throw new BadRequestException('Selecione um modelo contratual publicado para a tabela padrão.');
+    }
+    await this.assertPublishedTemplateVersion(
+      unitId,
+      version.contractTemplateVersionId,
+      version.customerType,
+    );
+
+    return this.priceTableVersions.manager.transaction(async (manager) => {
+      const repository = manager.getRepository(CommercialPriceTableVersion);
+      const current = await repository.findOne({
+        where: {
+          unitId,
+          customerType: version.customerType,
+          status: CommercialPriceTableVersionStatus.PUBLISHED,
+        },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (current && current.id !== version.id) {
+        current.status = CommercialPriceTableVersionStatus.RETIRED;
+        current.effectiveTo = new Date().toISOString().slice(0, 10);
+        await repository.save(current);
+      }
+      version.status = CommercialPriceTableVersionStatus.PUBLISHED;
+      version.publishedAt ||= new Date();
+      version.effectiveFrom ||= new Date().toISOString().slice(0, 10);
+      version.effectiveTo = null;
+      return repository.save(version);
+    });
+  }
+
+  async publishedTemplateOptions(unitId: string, customerType?: CustomerType) {
+    const templates = await this.templates.find({
+      where: customerType
+        ? { unitId, customerType, active: true }
+        : { unitId, active: true },
+      order: { name: 'ASC' },
+    });
+    if (!templates.length) return [];
+    const versions = await this.templateVersions.find({
+      where: {
+        unitId,
+        templateId: In(templates.map((template) => template.id)),
+        status: ContractTemplateStatus.PUBLISHED,
+      },
+      order: { version: 'DESC' },
+    });
+    return versions.map((version) => {
+      const template = templates.find((item) => item.id === version.templateId)!;
+      return {
+        id: version.id,
+        templateId: template.id,
+        templateName: template.name,
+        templateCode: template.code,
+        customerType: template.customerType,
+        version: version.version,
+        label: `${template.name} — versão ${version.version}`,
+      };
     });
   }
 
@@ -434,14 +648,15 @@ export class CommercialConfigService {
     if (!offer) throw new NotFoundException('Oferta pública não encontrada.');
     await this.feature.assertEnabled(offer.unitId);
     const version = await this.currentVersion(offer);
+    const billingOptions = await this.getBillingOptions(version);
     return {
       id: offer.id,
       name: offer.name,
       description: offer.description,
       customerType: offer.customerType,
       publicSlug: offer.publicSlug,
-      version: this.publicVersion(offer, version),
-      simulation: this.simulateVersion(offer, version, {}),
+      version: this.publicVersion(offer, version, billingOptions),
+      simulation: this.simulateVersion(offer, version, {}, billingOptions),
     };
   }
 
@@ -451,7 +666,8 @@ export class CommercialConfigService {
     });
     if (!offer) throw new NotFoundException('Oferta pública não encontrada.');
     await this.feature.assertEnabled(offer.unitId);
-    return this.simulateVersion(offer, await this.currentVersion(offer), dto);
+    const version = await this.currentVersion(offer);
+    return this.simulateVersion(offer, version, dto, await this.getBillingOptions(version));
   }
 
   async startPublicOffer(slug: string, dto: StartPublicOfferDto) {
@@ -461,14 +677,18 @@ export class CommercialConfigService {
     if (!offer) throw new NotFoundException('Oferta pública não encontrada.');
     await this.feature.assertEnabled(offer.unitId);
     const version = await this.currentVersion(offer);
+    const billingOptions = await this.getBillingOptions(version);
     const declaredDependents = dto.participants?.length ?? dto.dependentCount ?? 0;
-    if (offer.customerType === CustomerType.PERSON && dto.dependentCount != null && declaredDependents !== dto.dependentCount) {
+    if (offer.customerType === CustomerType.PERSON
+      && dto.dependentCount != null
+      && declaredDependents !== dto.dependentCount) {
       throw new BadRequestException('Preencha os dados de todos os dependentes selecionados.');
     }
     const calculation = this.simulateVersion(offer, version, {
+      cycle: dto.cycle,
       dependentCount: declaredDependents,
       lives: dto.lives,
-    });
+    }, billingOptions);
     const taxId = normalizeTaxId(dto.taxId);
     const validCustomerTaxId = offer.customerType === CustomerType.COMPANY
       ? isValidCnpj(taxId)
@@ -507,20 +727,21 @@ export class CommercialConfigService {
       teamId: offer.assignmentTeamId,
       pipelineStageId: stage?.id || null,
       offerVersionId: version.id,
+      priceTableVersionId: null,
+      contractTemplateVersionId: version.contractTemplateVersionId,
       customerType: offer.customerType,
       commercialStatus: CommercialStatus.APPROVED,
       negotiationSnapshot: {
         ...calculation,
         offer: { id: offer.id, code: offer.code, name: offer.name, version: version.version },
-        allowedBillingTypes: this.allowedBillingTypes(offer.customerType, version.billingCycle, version.allowedBillingTypes, version.pricingRules),
-        limits: { maxDependents: version.maxDependents, minLives: version.minLives, maxLives: version.maxLives },
+        contractTemplateVersionId: version.contractTemplateVersionId,
         source: 'PUBLIC_OFFER',
       },
       planPriceId: null,
       status: OpportunityStatus.OPEN,
       expectedValue: Number(calculation.pricing.finalAmount).toFixed(2),
-      billingCycle: version.billingCycle,
-      billingType: this.allowedBillingTypes(offer.customerType, version.billingCycle, version.allowedBillingTypes, version.pricingRules)[0] || BillingType.CREDIT_CARD,
+      billingCycle: calculation.cycle,
+      billingType: calculation.allowedBillingTypes[0] || BillingType.CREDIT_CARD,
       acquisitionSource: `PUBLIC_OFFER:${offer.code}`,
       notes: null,
       lossReason: null,
@@ -540,6 +761,9 @@ export class CommercialConfigService {
     await this.workflow.updateCustomer(precheckout.token, dto);
     for (const participant of dto.participants || []) {
       await this.workflow.addParticipant(precheckout.token, participant);
+    }
+    if (offer.customerType === CustomerType.PERSON) {
+      await this.workflow.prepareContract(precheckout.token);
     }
     return {
       opportunityId: opportunity.id,
@@ -568,30 +792,54 @@ export class CommercialConfigService {
     return version;
   }
 
-  private simulateVersion(offer: CommercialOffer, version: CommercialOfferVersion, dto: SimulatePublicOfferDto) {
+  private simulateVersion(
+    offer: CommercialOffer,
+    version: CommercialOfferVersion,
+    dto: SimulatePublicOfferDto,
+    billingOptions: CommercialOfferBillingOption[],
+  ) {
+    const requestedCycle = dto.cycle
+      || (billingOptions.some((option) => option.billingCycle === BillingCycle.MONTHLY)
+        ? BillingCycle.MONTHLY
+        : billingOptions[0]?.billingCycle);
+    const option = billingOptions.find((item) => item.billingCycle === requestedCycle);
+    if (!option) {
+      throw new BadRequestException('A periodicidade selecionada não está disponível nesta oferta.');
+    }
+    if (offer.customerType === CustomerType.COMPANY && option.billingCycle !== BillingCycle.MONTHLY) {
+      throw new BadRequestException('Pessoa jurídica utiliza somente cobrança mensal.');
+    }
+
     const lives = dto.lives ?? version.minLives;
-    if (offer.customerType === CustomerType.COMPANY) {
-      if (lives < version.minLives || (version.maxLives != null && lives > version.maxLives)) {
-        throw new BadRequestException('Quantidade de vidas fora dos limites da oferta.');
-      }
+    if (offer.customerType === CustomerType.COMPANY
+      && (lives < version.minLives || (version.maxLives != null && lives > version.maxLives))) {
+      throw new BadRequestException('Quantidade de vidas fora dos limites da oferta.');
     }
     const dependentCount = dto.dependentCount ?? 0;
     if (offer.customerType === CustomerType.PERSON && dependentCount > version.maxDependents) {
       throw new BadRequestException('Quantidade de dependentes acima do limite da oferta.');
     }
+
+    const allowedBillingTypes = this.allowedBillingTypes(
+      offer.customerType,
+      option.billingCycle,
+      option.allowedBillingTypes,
+      option.pricingRules,
+    );
     return {
       ...this.pricing.calculate({
         customerType: offer.customerType,
-        cycle: version.billingCycle,
-        billingType: this.allowedBillingTypes(offer.customerType, version.billingCycle, version.allowedBillingTypes, version.pricingRules)[0],
-        baseAmount: Number(version.holderAmount || version.unitPrice || 0),
-        dependentAmount: Number(version.dependentAmount || 0),
+        cycle: option.billingCycle,
+        billingType: allowedBillingTypes[0],
+        baseAmount: Number(option.holderAmount || option.unitPrice || 0),
+        dependentAmount: Number(option.dependentAmount || 0),
         dependentCount,
-        unitPrice: Number(version.unitPrice || 0),
+        unitPrice: Number(option.unitPrice || 0),
+        annualDiscountPercent: Number(option.annualDiscountPercent || 0),
         lives,
         discounts: [],
       }),
-      allowedBillingTypes: this.allowedBillingTypes(offer.customerType, version.billingCycle, version.allowedBillingTypes, version.pricingRules),
+      allowedBillingTypes,
       limits: {
         maxDependents: version.maxDependents,
         minLives: version.minLives,
@@ -600,19 +848,62 @@ export class CommercialConfigService {
     };
   }
 
-  private publicVersion(offer: CommercialOffer, version: CommercialOfferVersion) {
+  private publicVersion(
+    offer: CommercialOffer,
+    version: CommercialOfferVersion,
+    billingOptions: CommercialOfferBillingOption[],
+  ) {
+    const options = billingOptions.map((option) => ({
+      id: option.id,
+      billingCycle: option.billingCycle,
+      holderAmount: option.holderAmount == null ? null : Number(option.holderAmount),
+      dependentAmount: option.dependentAmount == null ? null : Number(option.dependentAmount),
+      unitPrice: option.unitPrice == null ? null : Number(option.unitPrice),
+      annualDiscountPercent: Number(option.annualDiscountPercent || 0),
+      allowedBillingTypes: this.allowedBillingTypes(
+        offer.customerType,
+        option.billingCycle,
+        option.allowedBillingTypes,
+        option.pricingRules,
+      ),
+    }));
+    const primary = options.find((option) => option.billingCycle === BillingCycle.MONTHLY) || options[0];
     return {
       id: version.id,
       version: version.version,
-      billingCycle: version.billingCycle,
-      holderAmount: version.holderAmount == null ? null : Number(version.holderAmount),
-      dependentAmount: version.dependentAmount == null ? null : Number(version.dependentAmount),
-      unitPrice: version.unitPrice == null ? null : Number(version.unitPrice),
+      billingCycle: primary?.billingCycle || version.billingCycle,
+      holderAmount: primary?.holderAmount ?? (version.holderAmount == null ? null : Number(version.holderAmount)),
+      dependentAmount: primary?.dependentAmount ?? (version.dependentAmount == null ? null : Number(version.dependentAmount)),
+      unitPrice: primary?.unitPrice ?? (version.unitPrice == null ? null : Number(version.unitPrice)),
+      annualDiscountPercent: primary?.annualDiscountPercent || 0,
       maxDependents: version.maxDependents,
       minLives: version.minLives,
       maxLives: version.maxLives,
-      allowedBillingTypes: this.allowedBillingTypes(offer.customerType, version.billingCycle, version.allowedBillingTypes, version.pricingRules),
+      allowedBillingTypes: primary?.allowedBillingTypes || [],
+      billingOptions: options,
+      contractTemplateVersionId: version.contractTemplateVersionId,
     };
+  }
+
+  private async getBillingOptions(version: CommercialOfferVersion) {
+    const persisted = await this.offerBillingOptions.find({
+      where: { unitId: version.unitId, offerVersionId: version.id },
+      order: { billingCycle: 'ASC' },
+    });
+    if (persisted.length) return persisted;
+
+    // Compatibilidade com versões criadas antes das opções múltiplas de cobrança.
+    return [this.offerBillingOptions.create({
+      unitId: version.unitId,
+      offerVersionId: version.id,
+      billingCycle: version.billingCycle,
+      holderAmount: version.holderAmount,
+      dependentAmount: version.dependentAmount,
+      unitPrice: version.unitPrice,
+      annualDiscountPercent: '0.00',
+      allowedBillingTypes: version.allowedBillingTypes,
+      pricingRules: version.pricingRules,
+    })];
   }
 
   private async assertPublishedTemplateVersion(
@@ -631,28 +922,127 @@ export class CommercialConfigService {
     return version;
   }
 
-  private validateOfferVersion(customerType: CustomerType, dto: CreateCommercialOfferVersionDto) {
-    if (!dto.allowedBillingTypes?.length) throw new BadRequestException('Informe ao menos uma forma de pagamento.');
-    if (customerType === CustomerType.PERSON && dto.holderAmount == null) {
-      throw new BadRequestException('Informe o valor do titular.');
-    }
-    if (customerType === CustomerType.PERSON) {
-      const allowed = this.allowedBillingTypes(customerType, dto.billingCycle, dto.allowedBillingTypes, dto.pricingRules || {});
-      if (!allowed.includes(BillingType.CREDIT_CARD)) {
-        throw new BadRequestException('Ofertas de pessoa física devem permitir cartão de crédito.');
-      }
-      if (allowed.length !== dto.allowedBillingTypes.length) {
-        throw new BadRequestException('Formas de pagamento incompatíveis com a periodicidade da oferta PF. Boleto mensal exige autorização e Pix é permitido apenas no anual.');
-      }
-    }
-    if (customerType === CustomerType.COMPANY && dto.unitPrice == null) {
-      throw new BadRequestException('Informe o preço por vida.');
-    }
+  private normalizeOfferBillingOptions(
+    customerType: CustomerType,
+    dto: CreateCommercialOfferVersionDto,
+  ): CommercialOfferBillingOptionDto[] {
+    const source = dto.billingOptions?.length
+      ? dto.billingOptions
+      : [{
+          billingCycle: dto.billingCycle || BillingCycle.MONTHLY,
+          holderAmount: dto.holderAmount,
+          dependentAmount: dto.dependentAmount,
+          unitPrice: dto.unitPrice,
+          annualDiscountPercent: dto.annualDiscountPercent || 0,
+          allowedBillingTypes: dto.allowedBillingTypes || [],
+          pricingRules: dto.pricingRules || {},
+        }];
+    return source.map((option) => ({
+      ...option,
+      holderAmount: customerType === CustomerType.PERSON ? option.holderAmount : undefined,
+      dependentAmount: customerType === CustomerType.PERSON ? option.dependentAmount : undefined,
+      unitPrice: customerType === CustomerType.COMPANY ? option.unitPrice : undefined,
+      annualDiscountPercent: option.billingCycle === BillingCycle.YEARLY
+        ? Number(option.annualDiscountPercent || 0)
+        : 0,
+      allowedBillingTypes: [...new Set(option.allowedBillingTypes || [])],
+      pricingRules: option.pricingRules || {},
+    }));
+  }
+
+  private validateOfferVersion(
+    customerType: CustomerType,
+    dto: CreateCommercialOfferVersionDto,
+    options: CommercialOfferBillingOptionDto[],
+  ) {
+    this.validateBillingOptions(customerType, options);
     if (dto.maxLives != null && dto.maxLives < (dto.minLives || 1)) {
       throw new BadRequestException('O máximo de vidas deve ser maior ou igual ao mínimo.');
     }
   }
 
+  private validateBillingOptions(
+    customerType: CustomerType,
+    options: CommercialOfferBillingOptionDto[],
+  ) {
+    if (!options.length) throw new BadRequestException('Informe ao menos uma opção de cobrança.');
+    if (new Set(options.map((option) => option.billingCycle)).size !== options.length) {
+      throw new BadRequestException('Cada periodicidade pode aparecer somente uma vez na oferta.');
+    }
+
+    for (const option of options) {
+      if (!option.allowedBillingTypes?.length) {
+        throw new BadRequestException('Informe ao menos uma forma de pagamento em cada periodicidade.');
+      }
+      const allowed = this.allowedBillingTypes(
+        customerType,
+        option.billingCycle,
+        option.allowedBillingTypes,
+        option.pricingRules || {},
+      );
+      if (allowed.length !== option.allowedBillingTypes.length) {
+        throw new BadRequestException(
+          'Há formas de pagamento incompatíveis com a periodicidade selecionada.',
+        );
+      }
+      if (customerType === CustomerType.PERSON) {
+        if (![BillingCycle.MONTHLY, BillingCycle.YEARLY].includes(option.billingCycle)) {
+          throw new BadRequestException('Ofertas PF aceitam apenas cobrança mensal ou anual.');
+        }
+        if (option.holderAmount == null) {
+          throw new BadRequestException('Informe o valor do titular em todas as opções PF.');
+        }
+        if (!allowed.includes(BillingType.CREDIT_CARD)) {
+          throw new BadRequestException('Ofertas PF devem permitir cartão de crédito.');
+        }
+      } else {
+        if (options.length !== 1 || option.billingCycle !== BillingCycle.MONTHLY) {
+          throw new BadRequestException('Ofertas PJ possuem somente cobrança mensal.');
+        }
+        if (option.unitPrice == null) {
+          throw new BadRequestException('Informe o preço mensal por vida.');
+        }
+      }
+    }
+  }
+
+  private validatePriceTable(dto: CreateCommercialPriceTableVersionDto) {
+    if (!dto.monthlyBillingTypes?.length) {
+      throw new BadRequestException('Informe as formas de pagamento mensais.');
+    }
+    if (dto.maxLives != null && dto.maxLives < (dto.minLives || 1)) {
+      throw new BadRequestException('O máximo de vidas deve ser maior ou igual ao mínimo.');
+    }
+    if (dto.customerType === CustomerType.PERSON) {
+      if (dto.holderAmount == null) throw new BadRequestException('Informe o valor mensal do titular.');
+      if (!dto.monthlyBillingTypes.includes(BillingType.CREDIT_CARD)) {
+        throw new BadRequestException('A tabela PF mensal deve permitir cartão de crédito.');
+      }
+      if (!(dto.yearlyBillingTypes || []).includes(BillingType.CREDIT_CARD)) {
+        throw new BadRequestException('A tabela PF anual deve permitir cartão de crédito.');
+      }
+      const monthly = this.allowedBillingTypes(
+        CustomerType.PERSON,
+        BillingCycle.MONTHLY,
+        dto.monthlyBillingTypes,
+        { allowMonthlyBoleto: dto.monthlyBillingTypes.includes(BillingType.BOLETO) },
+      );
+      const yearly = this.allowedBillingTypes(
+        CustomerType.PERSON,
+        BillingCycle.YEARLY,
+        dto.yearlyBillingTypes || [],
+      );
+      if (monthly.length !== dto.monthlyBillingTypes.length
+        || yearly.length !== (dto.yearlyBillingTypes || []).length) {
+        throw new BadRequestException('Há formas de pagamento incompatíveis com a periodicidade PF.');
+      }
+      return;
+    }
+    if (dto.unitPrice == null) throw new BadRequestException('Informe o preço mensal por vida.');
+    if (dto.yearlyBillingTypes?.length) {
+      throw new BadRequestException('Pessoa jurídica utiliza somente cobrança mensal.');
+    }
+  }
 
   private allowedBillingTypes(
     customerType: CustomerType,
@@ -738,7 +1128,7 @@ export class CommercialConfigService {
         role: UnitRole.SALES,
       },
     });
-    const eligibleUserIds = [...new Set(memberships.map((membership) => membership.userId))];
+    const eligibleUserIds: string[] = [...new Set<string>(memberships.map((membership) => membership.userId))];
     if (!eligibleUserIds.length) return null;
     const counts = await this.opportunities.createQueryBuilder('opportunity')
       .select('opportunity.owner_user_id', 'ownerUserId')

@@ -7,15 +7,15 @@ import { usePageTitle } from '@/lib/page-title-context';
 const cards = [
   {
     href: '/dashboard/configuracoes/comercial',
-    title: 'Políticas comerciais',
-    description: 'Defina limites de desconto, preço mínimo, formas de pagamento e alçadas de aprovação.',
-    action: 'Gerenciar políticas',
+    title: 'Preços e políticas comerciais',
+    description: 'Defina os preços padrão das oportunidades, contratos sugeridos, limites e alçadas.',
+    action: 'Gerenciar preços e políticas',
   },
   {
     href: '/dashboard/configuracoes/ofertas',
-    title: 'Ofertas e preços',
-    description: 'Cadastre ofertas e mantenha uma única versão de preço vigente, preservando o histórico.',
-    action: 'Gerenciar ofertas',
+    title: 'Ofertas públicas',
+    description: 'Crie links de contratação autônoma com opções mensal e anual, preços e contrato próprios.',
+    action: 'Gerenciar ofertas públicas',
   },
   {
     href: '/dashboard/configuracoes/funis',
@@ -26,7 +26,7 @@ const cards = [
   {
     href: '/dashboard/configuracoes/contratos',
     title: 'Modelos contratuais',
-    description: 'Crie modelos, publique versões e vincule os documentos às ofertas compatíveis.',
+    description: 'Crie modelos, publique versões e vincule os documentos às oportunidades e ofertas públicas.',
     action: 'Gerenciar contratos',
   },
   {

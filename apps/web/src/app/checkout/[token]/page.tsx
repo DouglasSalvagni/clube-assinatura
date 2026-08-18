@@ -10,16 +10,21 @@ type BillingType = 'CREDIT_CARD' | 'BOLETO' | 'PIX';
 type CheckoutData = {
   status: string;
   customerType: 'PERSON' | 'COMPANY';
+  participantEditingAllowed: boolean;
   customer: Record<string, string | null>;
   pricing: any;
   allowedBillingTypes: BillingType[];
   participants: Array<{ id: string; name: string; taxId: string; relationship?: string }>;
+  contractTemplate?: { name: string; code: string; version: number; versionId: string } | null;
   contract?: {
     content: string;
     hash: string;
     status: string;
     relationType?: 'ORIGINAL' | 'AMENDMENT' | 'RENEWAL' | 'REPLACEMENT';
     requiresPayment?: boolean;
+    templateName?: string | null;
+    templateCode?: string | null;
+    templateVersion?: number | null;
   } | null;
 };
 
@@ -45,6 +50,18 @@ const labels: Record<string, string> = {
   BOLETO: 'Boleto',
   PIX: 'Pix',
 };
+
+const cycleLabels: Record<string, string> = {
+  MONTHLY: 'Mensal',
+  YEARLY: 'Anual',
+};
+
+function money(value: unknown) {
+  return Number(value || 0).toLocaleString('pt-BR', {
+    style: 'currency',
+    currency: 'BRL',
+  });
+}
 
 export default function PublicCheckoutPage() {
   const { token } = useParams<{ token: string }>();
@@ -265,17 +282,33 @@ export default function PublicCheckoutPage() {
       {!isRevision && data?.customerType === 'PERSON' && (
         <section className="rounded-xl border p-5">
           <h2 className="font-semibold">Dependentes</h2>
-          <form onSubmit={addDependent} className="mt-4 grid gap-3 md:grid-cols-3">
-            <input value={dependent.name} onChange={e=>setDependent({...dependent,name:e.target.value})} required placeholder="Nome" className="rounded-lg border px-3 py-2" />
-            <input value={dependent.taxId} onChange={e=>setDependent({...dependent,taxId:e.target.value})} required placeholder="CPF" className="rounded-lg border px-3 py-2" />
-            <input value={dependent.relationship} onChange={e=>setDependent({...dependent,relationship:e.target.value})} placeholder="Parentesco" className="rounded-lg border px-3 py-2" />
-            <button disabled={busy} className="rounded-lg border px-4 py-2 md:col-span-3">Adicionar dependente</button>
-          </form>
+          {data.participantEditingAllowed ? (
+            <>
+              <p className="mt-1 text-sm text-gray-600">
+                Confira os dependentes da oferta. Alterações recalculam o valor antes da geração do contrato.
+              </p>
+              <form onSubmit={addDependent} className="mt-4 grid gap-3 md:grid-cols-3">
+                <input value={dependent.name} onChange={e=>setDependent({...dependent,name:e.target.value})} required placeholder="Nome" className="rounded-lg border px-3 py-2" />
+                <input value={dependent.taxId} onChange={e=>setDependent({...dependent,taxId:e.target.value})} required placeholder="CPF" className="rounded-lg border px-3 py-2" />
+                <input value={dependent.relationship} onChange={e=>setDependent({...dependent,relationship:e.target.value})} placeholder="Parentesco" className="rounded-lg border px-3 py-2" />
+                <button disabled={busy} className="rounded-lg border px-4 py-2 md:col-span-3">Adicionar dependente</button>
+              </form>
+            </>
+          ) : (
+            <p className="mt-2 rounded-lg bg-gray-50 p-3 text-sm text-gray-600">
+              A quantidade e os dependentes foram definidos durante a negociação. Para alterar estas condições, fale com o responsável comercial antes do aceite.
+            </p>
+          )}
           <div className="mt-4 space-y-2">
+            {data.participants.length === 0 && (
+              <p className="text-sm text-gray-500">Nenhum dependente incluído.</p>
+            )}
             {data.participants.map(item => (
               <div key={item.id} className="flex items-center justify-between rounded-lg bg-gray-50 p-3 text-sm">
                 <span>{item.name} — {item.taxId}</span>
-                <button onClick={()=>removeDependent(item.id)} disabled={busy} className="text-red-600">Remover</button>
+                {data.participantEditingAllowed && (
+                  <button onClick={()=>removeDependent(item.id)} disabled={busy} className="text-red-600">Remover</button>
+                )}
               </div>
             ))}
           </div>
@@ -283,17 +316,67 @@ export default function PublicCheckoutPage() {
       )}
 
       <section className="rounded-xl border p-5">
-        <h2 className="font-semibold">Resumo financeiro</h2>
-        <p className="mt-3 text-3xl font-semibold">{total.toLocaleString('pt-BR',{style:'currency',currency:'BRL'})}</p>
-        <p className="text-sm text-gray-600">Periodicidade: {data?.pricing?.cycle || '-'}</p>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="font-semibold">Resumo financeiro</h2>
+            <p className="mt-3 text-3xl font-semibold">{money(total)}</p>
+            <p className="text-sm text-gray-600">
+              Periodicidade: {cycleLabels[data?.pricing?.cycle || ''] || data?.pricing?.cycle || '-'}
+              {data?.pricing?.cycle === 'YEARLY'
+                ? ` • equivalente a ${money(data?.pricing?.pricing?.monthlyEquivalent)} por mês`
+                : ''}
+            </p>
+          </div>
+          {Number(data?.pricing?.pricing?.annualDiscountAmount || 0) > 0 && (
+            <div className="rounded-lg bg-green-50 px-3 py-2 text-sm text-green-700">
+              Economia anual de <strong>{money(data?.pricing?.pricing?.annualDiscountAmount)}</strong>
+            </div>
+          )}
+        </div>
+        <dl className="mt-5 space-y-2 border-t pt-4 text-sm">
+          <div className="flex justify-between gap-4">
+            <dt className="text-gray-600">
+              {data?.pricing?.cycle === 'YEARLY' ? 'Projeção de 12 meses' : 'Subtotal mensal'}
+            </dt>
+            <dd>{money(data?.pricing?.pricing?.grossPeriodAmount || data?.pricing?.pricing?.monthlySubtotal)}</dd>
+          </div>
+          {Number(data?.pricing?.pricing?.annualDiscountAmount || 0) > 0 && (
+            <div className="flex justify-between gap-4">
+              <dt className="text-gray-600">
+                Desconto anual ({Number(data?.pricing?.pricing?.annualDiscountPercent || 0)}%)
+              </dt>
+              <dd className="text-green-700">− {money(data?.pricing?.pricing?.annualDiscountAmount)}</dd>
+            </div>
+          )}
+          {Number(data?.pricing?.pricing?.commercialDiscountAmount || 0) > 0 && (
+            <div className="flex justify-between gap-4">
+              <dt className="text-gray-600">Desconto comercial aprovado</dt>
+              <dd className="text-green-700">− {money(data?.pricing?.pricing?.commercialDiscountAmount)}</dd>
+            </div>
+          )}
+        </dl>
+        <p className="mt-4 rounded-lg bg-gray-50 p-3 text-xs text-gray-600">
+          A periodicidade foi definida na oferta ou negociação e não pode ser alterada neste checkout.
+        </p>
       </section>
 
       <section className="rounded-xl border p-5">
         <h2 className="font-semibold">Contrato</h2>
+        {data?.contractTemplate && (
+          <p className="mt-1 text-sm text-gray-600">
+            {data.contractTemplate.name} • versão {data.contractTemplate.version}
+          </p>
+        )}
         {!data?.contract ? (
           <button onClick={generateContract} disabled={busy} className="mt-4 rounded-lg bg-black px-4 py-2 text-white">Gerar contrato</button>
         ) : (
           <>
+            {(data.contract.templateName || data.contract.templateVersion) && (
+              <div className="mt-4 rounded-lg border bg-white px-4 py-3 text-sm">
+                <span className="font-medium">{data.contract.templateName || 'Modelo contratual'}</span>
+                {data.contract.templateVersion ? ` • versão ${data.contract.templateVersion}` : ''}
+              </div>
+            )}
             <SafeRichText content={data.contract.content} className="mt-4 rounded-lg bg-gray-50 p-5 text-sm text-gray-800" />
             {data.contract.status !== 'ACCEPTED' ? (
               <div className="mt-4">

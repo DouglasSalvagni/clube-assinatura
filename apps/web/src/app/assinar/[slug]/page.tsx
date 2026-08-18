@@ -5,16 +5,27 @@ import { useParams, useRouter } from 'next/navigation';
 import { API_BASE } from '@/lib/api';
 import { PublicPageSkeleton } from '@/components/page-skeleton';
 
+type BillingCycle = 'MONTHLY' | 'YEARLY';
+type BillingOption = {
+  billingCycle: BillingCycle;
+  holderAmount: number | null;
+  dependentAmount: number | null;
+  unitPrice: number | null;
+  annualDiscountPercent: number;
+  allowedBillingTypes: string[];
+};
+
 type Offer = {
   name: string;
   description?: string | null;
   customerType: 'PERSON' | 'COMPANY';
   version: {
-    billingCycle: string;
+    billingCycle: BillingCycle;
     maxDependents: number;
     minLives: number;
     maxLives: number | null;
     allowedBillingTypes: string[];
+    billingOptions?: BillingOption[];
   };
   simulation: any;
 };
@@ -34,11 +45,24 @@ async function publicApi(path: string, init?: RequestInit) {
   return body;
 }
 
+function money(value: unknown) {
+  return Number(value || 0).toLocaleString('pt-BR', {
+    style: 'currency',
+    currency: 'BRL',
+  });
+}
+
+const cycleLabels: Record<BillingCycle, string> = {
+  MONTHLY: 'Mensal',
+  YEARLY: 'Anual',
+};
+
 export default function PublicOfferPage() {
   const { slug } = useParams<{ slug: string }>();
   const router = useRouter();
   const [offer, setOffer] = useState<Offer | null>(null);
   const [simulation, setSimulation] = useState<any>(null);
+  const [cycle, setCycle] = useState<BillingCycle>('MONTHLY');
   const [dependentCount, setDependentCount] = useState(0);
   const [lives, setLives] = useState(1);
   const [participants, setParticipants] = useState<Participant[]>([]);
@@ -61,8 +85,14 @@ export default function PublicOfferPage() {
   const load = useCallback(async () => {
     try {
       const result = await publicApi(`/public/offers/${slug}`);
+      const defaultCycle = (result.simulation?.cycle
+        || result.version?.billingOptions?.find((option: BillingOption) => option.billingCycle === 'MONTHLY')?.billingCycle
+        || result.version?.billingOptions?.[0]?.billingCycle
+        || result.version?.billingCycle
+        || 'MONTHLY') as BillingCycle;
       setOffer(result);
       setSimulation(result.simulation);
+      setCycle(defaultCycle);
       setLives(result.version?.minLives || 1);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Oferta não encontrada.');
@@ -94,9 +124,10 @@ export default function PublicOfferPage() {
       try {
         const result = await publicApi(`/public/offers/${slug}/simulate`, {
           method: 'POST',
-          body: JSON.stringify(
-            offer.customerType === 'PERSON' ? { dependentCount } : { lives },
-          ),
+          body: JSON.stringify({
+            cycle,
+            ...(offer.customerType === 'PERSON' ? { dependentCount } : { lives }),
+          }),
         });
         setSimulation(result);
         setError('');
@@ -105,12 +136,25 @@ export default function PublicOfferPage() {
       }
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [dependentCount, lives, offer, slug]);
+  }, [cycle, dependentCount, lives, offer, slug]);
 
-  const total = useMemo(
-    () => Number(simulation?.pricing?.finalAmount || 0),
-    [simulation],
-  );
+  const billingOptions = useMemo(() => {
+    if (!offer) return [];
+    return offer.version.billingOptions?.length
+      ? offer.version.billingOptions
+      : [{
+          billingCycle: offer.version.billingCycle,
+          holderAmount: null,
+          dependentAmount: null,
+          unitPrice: null,
+          annualDiscountPercent: 0,
+          allowedBillingTypes: offer.version.allowedBillingTypes,
+        }];
+  }, [offer]);
+
+  const pricing = simulation?.pricing || {};
+  const total = Number(pricing.finalAmount || 0);
+  const isYearly = simulation?.cycle === 'YEARLY';
 
   async function lookupPostalCode() {
     const postalCode = customer.postalCode.replace(/\D/g, '');
@@ -150,6 +194,7 @@ export default function PublicOfferPage() {
         method: 'POST',
         body: JSON.stringify({
           ...customer,
+          cycle,
           dependentCount: offer.customerType === 'PERSON' ? dependentCount : undefined,
           lives: offer.customerType === 'COMPANY' ? lives : undefined,
           participants: offer.customerType === 'PERSON' ? participants : undefined,
@@ -170,7 +215,7 @@ export default function PublicOfferPage() {
     <main className="mx-auto max-w-4xl space-y-6 p-6 md:p-10">
       <header className="rounded-2xl border bg-white p-6 shadow-sm">
         <p className="text-xs font-semibold uppercase tracking-wider text-gray-500">
-          Adesão online
+          Contratação online
         </p>
         <h1 className="mt-2 text-3xl font-semibold">{offer?.name || 'Oferta indisponível'}</h1>
         {offer?.description && <p className="mt-2 text-gray-600">{offer.description}</p>}
@@ -185,9 +230,42 @@ export default function PublicOfferPage() {
       {offer && (
         <form onSubmit={submit} className="space-y-6">
           <section className="rounded-2xl border bg-white p-6 shadow-sm">
-            <h2 className="text-lg font-semibold">Configure sua contratação</h2>
+            <h2 className="text-lg font-semibold">Escolha sua contratação</h2>
+            <p className="mt-1 text-sm text-gray-600">
+              A periodicidade escolhida será mantida no contrato e no pagamento.
+            </p>
+
+            {offer.customerType === 'PERSON' && billingOptions.length > 1 && (
+              <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                {billingOptions.map((option) => (
+                  <button
+                    key={option.billingCycle}
+                    type="button"
+                    onClick={() => setCycle(option.billingCycle)}
+                    className={`rounded-xl border p-4 text-left transition ${
+                      cycle === option.billingCycle
+                        ? 'border-black bg-gray-50 ring-2 ring-black/10'
+                        : 'hover:border-gray-400'
+                    }`}
+                  >
+                    <span className="font-semibold">{cycleLabels[option.billingCycle]}</span>
+                    {option.billingCycle === 'YEARLY' && option.annualDiscountPercent > 0 && (
+                      <span className="ml-2 rounded-full bg-green-100 px-2 py-1 text-xs font-semibold text-green-700">
+                        Economize {option.annualDiscountPercent}%
+                      </span>
+                    )}
+                    <span className="mt-2 block text-xs text-gray-500">
+                      {option.billingCycle === 'YEARLY'
+                        ? 'Pagamento referente aos 12 meses'
+                        : 'Cobrança recorrente a cada mês'}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
+
             {offer.customerType === 'PERSON' ? (
-              <label className="mt-4 block max-w-sm text-sm">
+              <label className="mt-5 block max-w-sm text-sm">
                 <span className="font-medium">Quantidade de dependentes</span>
                 <input
                   type="number"
@@ -202,7 +280,7 @@ export default function PublicOfferPage() {
                 </span>
               </label>
             ) : (
-              <label className="mt-4 block max-w-sm text-sm">
+              <label className="mt-5 block max-w-sm text-sm">
                 <span className="font-medium">Quantidade de vidas</span>
                 <input
                   type="number"
@@ -212,16 +290,42 @@ export default function PublicOfferPage() {
                   onChange={(event) => setLives(Number(event.target.value))}
                   className="mt-1 w-full rounded-lg border px-3 py-2"
                 />
+                <span className="mt-1 block text-xs text-gray-500">
+                  Empresas utilizam cobrança mensal.
+                </span>
               </label>
             )}
+
             <div className="mt-5 rounded-xl bg-gray-50 p-5">
-              <p className="text-sm text-gray-600">Valor atualizado</p>
-              <p className="mt-1 text-3xl font-semibold">
-                {total.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}
-              </p>
-              <p className="mt-1 text-xs text-gray-500">
-                Periodicidade: {offer.version.billingCycle}
-              </p>
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="text-sm text-gray-600">Total da contratação</p>
+                  <p className="mt-1 text-3xl font-semibold">{money(total)}</p>
+                  <p className="mt-1 text-xs text-gray-500">
+                    {cycleLabels[(simulation?.cycle || cycle) as BillingCycle]}
+                    {isYearly && ` • equivalente a ${money(pricing.monthlyEquivalent)} por mês`}
+                  </p>
+                </div>
+                {isYearly && Number(pricing.annualDiscountAmount || 0) > 0 && (
+                  <div className="rounded-lg bg-green-100 px-3 py-2 text-sm text-green-800">
+                    Economia anual de <strong>{money(pricing.annualDiscountAmount)}</strong>
+                  </div>
+                )}
+              </div>
+              {isYearly && (
+                <dl className="mt-5 space-y-2 border-t pt-4 text-sm">
+                  <div className="flex justify-between gap-4">
+                    <dt className="text-gray-600">Projeção de 12 meses</dt>
+                    <dd>{money(pricing.grossPeriodAmount)}</dd>
+                  </div>
+                  <div className="flex justify-between gap-4">
+                    <dt className="text-gray-600">
+                      Desconto anual ({Number(pricing.annualDiscountPercent || 0)}%)
+                    </dt>
+                    <dd className="text-green-700">− {money(pricing.annualDiscountAmount)}</dd>
+                  </div>
+                </dl>
+              )}
             </div>
           </section>
 

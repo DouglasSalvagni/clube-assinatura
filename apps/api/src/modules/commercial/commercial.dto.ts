@@ -20,6 +20,7 @@ export class SimulateNegotiationDto {
   @IsOptional() @IsNumber() @Min(0) dependentAmount?: number;
   @IsOptional() @IsInt() @Min(0) dependentCount?: number;
   @IsOptional() @IsNumber() @Min(0) unitPrice?: number;
+  @IsOptional() @IsNumber() @Min(0) @Max(100) annualDiscountPercent?: number;
   @IsOptional() @IsInt() @Min(1) lives?: number;
   @IsOptional() @IsArray() @ValidateNested({ each: true }) @Type(() => DiscountDto) discounts?: DiscountDto[];
 }
@@ -29,6 +30,7 @@ export class CreatePolicyDto {
   @IsOptional() @IsEnum(CustomerType) customerType?: CustomerType;
   @IsOptional() @IsIn([UnitRole.OWNER, UnitRole.ADMIN, UnitRole.MANAGER, UnitRole.SALES]) targetRole?: UnitRole;
   @EmptyToUndefined() @IsOptional() @IsUUID() targetUserId?: string;
+  @EmptyToUndefined() @IsOptional() @IsUUID() targetTeamId?: string;
   @IsOptional() @IsNumber() @Min(0) @Max(100) maxDiscountPercent?: number;
   @IsOptional() @IsNumber() @Min(0) maxDiscountAmount?: number;
   @IsOptional() @IsNumber() @Min(0) minUnitPrice?: number;
@@ -87,20 +89,49 @@ export class CreateCommercialOfferDto {
   @IsOptional() @IsObject() metadata?: Record<string, any>;
 }
 
-export class CreateCommercialOfferVersionDto {
+export class CommercialOfferBillingOptionDto {
   @IsEnum(BillingCycle) billingCycle: BillingCycle;
   @IsOptional() @IsNumber() @Min(0) holderAmount?: number;
   @IsOptional() @IsNumber() @Min(0) dependentAmount?: number;
   @IsOptional() @IsNumber() @Min(0) unitPrice?: number;
+  @IsOptional() @IsNumber() @Min(0) @Max(100) annualDiscountPercent?: number;
+  @IsArray() @IsEnum(BillingType, { each: true }) allowedBillingTypes: BillingType[];
+  @IsOptional() @IsObject() pricingRules?: Record<string, any>;
+}
+
+export class CreateCommercialOfferVersionDto {
+  @IsOptional() @IsEnum(BillingCycle) billingCycle?: BillingCycle;
+  @IsOptional() @IsArray() @ValidateNested({ each: true }) @Type(() => CommercialOfferBillingOptionDto)
+  billingOptions?: CommercialOfferBillingOptionDto[];
+  @IsOptional() @IsNumber() @Min(0) holderAmount?: number;
+  @IsOptional() @IsNumber() @Min(0) dependentAmount?: number;
+  @IsOptional() @IsNumber() @Min(0) unitPrice?: number;
+  @IsOptional() @IsNumber() @Min(0) @Max(100) annualDiscountPercent?: number;
   @IsOptional() @IsInt() @Min(1) includedLives?: number;
   @IsOptional() @IsInt() @Min(0) maxDependents?: number;
   @IsOptional() @IsInt() @Min(1) minLives?: number;
   @IsOptional() @IsInt() @Min(1) maxLives?: number;
-  @IsArray() @IsEnum(BillingType, { each: true }) allowedBillingTypes: BillingType[];
+  @IsOptional() @IsArray() @IsEnum(BillingType, { each: true }) allowedBillingTypes?: BillingType[];
   @IsOptional() @IsObject() pricingRules?: Record<string, any>;
   @EmptyToUndefined() @IsOptional() @IsUUID() contractTemplateVersionId?: string;
   @IsOptional() @IsDateString() effectiveFrom?: string;
   @IsOptional() @IsDateString() effectiveTo?: string;
+  @IsOptional() @IsObject() metadata?: Record<string, any>;
+}
+
+export class CreateCommercialPriceTableVersionDto {
+  @IsEnum(CustomerType) customerType: CustomerType;
+  @IsOptional() @IsNumber() @Min(0) holderAmount?: number;
+  @IsOptional() @IsNumber() @Min(0) dependentAmount?: number;
+  @IsOptional() @IsNumber() @Min(0) unitPrice?: number;
+  @IsOptional() @IsNumber() @Min(0) @Max(100) annualDiscountPercent?: number;
+  @IsOptional() @IsInt() @Min(0) maxDependents?: number;
+  @IsOptional() @IsInt() @Min(1) minLives?: number;
+  @IsOptional() @IsInt() @Min(1) maxLives?: number;
+  @IsArray() @IsEnum(BillingType, { each: true }) monthlyBillingTypes: BillingType[];
+  @IsOptional() @IsArray() @IsEnum(BillingType, { each: true }) yearlyBillingTypes?: BillingType[];
+  @EmptyToUndefined() @IsOptional() @IsUUID() contractTemplateVersionId?: string;
+  @IsOptional() @IsDateString() effectiveFrom?: string;
   @IsOptional() @IsObject() metadata?: Record<string, any>;
 }
 
@@ -133,11 +164,13 @@ export class CreateContractTemplateVersionDto {
 }
 
 export class SimulatePublicOfferDto {
+  @IsOptional() @IsEnum(BillingCycle) cycle?: BillingCycle;
   @IsOptional() @IsInt() @Min(0) dependentCount?: number;
   @IsOptional() @IsInt() @Min(1) lives?: number;
 }
 
 export class StartPublicOfferDto extends UpdatePrecheckoutCustomerDto {
+  @IsOptional() @IsEnum(BillingCycle) cycle?: BillingCycle;
   @IsOptional() @IsInt() @Min(0) dependentCount?: number;
   @IsOptional() @IsInt() @Min(1) lives?: number;
   @IsOptional() @IsArray() @ValidateNested({ each: true }) @Type(() => PrecheckoutParticipantDto)
@@ -159,6 +192,7 @@ export class ContractRevisionTermsDto {
   @IsOptional() @IsNumber() @Min(0) dependentAmount?: number;
   @IsOptional() @IsInt() @Min(0) dependentCount?: number;
   @IsOptional() @IsNumber() @Min(0) unitPrice?: number;
+  @IsOptional() @IsNumber() @Min(0) @Max(100) annualDiscountPercent?: number;
   @IsOptional() @IsInt() @Min(1) lives?: number;
   @IsOptional() @IsArray() @IsEnum(BillingType, { each: true }) allowedBillingTypes?: BillingType[];
   @IsOptional() @IsArray() @ValidateNested({ each: true }) @Type(() => DiscountDto) discounts?: DiscountDto[];

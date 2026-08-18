@@ -21,6 +21,8 @@ type Opportunity = {
   ownerUserId: string | null;
   teamId: string | null;
   checkoutLink?: string | null;
+  priceTableVersionId?: string | null;
+  contractTemplateVersionId?: string | null;
 };
 
 type User = { id: string; name: string; role?: string; active?: boolean };
@@ -58,6 +60,40 @@ type PolicyEvaluation = {
   approval?: ApprovalSummary | null;
 };
 
+type PriceTableVersion = {
+  id: string;
+  version: number;
+  status: 'DRAFT' | 'PUBLISHED' | 'RETIRED';
+  effectiveFrom?: string | null;
+  effectiveTo?: string | null;
+  customerType: 'PERSON' | 'COMPANY';
+  holderAmount: string | null;
+  dependentAmount: string | null;
+  unitPrice: string | null;
+  annualDiscountPercent: string;
+  maxDependents: number;
+  minLives: number;
+  maxLives: number | null;
+  monthlyBillingTypes: string[];
+  yearlyBillingTypes: string[];
+  contractTemplateVersionId: string | null;
+};
+
+type ContractTemplateOption = {
+  id: string;
+  label: string;
+  templateName: string;
+  version: number;
+  customerType: 'PERSON' | 'COMPANY';
+};
+
+function money(value: unknown) {
+  return Number(value || 0).toLocaleString('pt-BR', {
+    style: 'currency',
+    currency: 'BRL',
+  });
+}
+
 export default function NegotiationWorkspacePage() {
   const { oportunidadeId } = useParams<{ oportunidadeId: string }>();
   const router = useRouter();
@@ -71,6 +107,9 @@ export default function NegotiationWorkspacePage() {
   const [teams, setTeams] = useState<Team[]>([]);
   const [users, setUsers] = useState<User[]>([]);
   const [contracts, setContracts] = useState<ContractSummary[]>([]);
+  const [priceTable, setPriceTable] = useState<PriceTableVersion | null>(null);
+  const [currentPriceTable, setCurrentPriceTable] = useState<PriceTableVersion | null>(null);
+  const [contractOptions, setContractOptions] = useState<ContractTemplateOption[]>([]);
   const [revisionUrl, setRevisionUrl] = useState('');
   const [revision, setRevision] = useState({
     relationType: 'AMENDMENT',
@@ -90,6 +129,8 @@ export default function NegotiationWorkspacePage() {
     unitPrice: '0',
     lives: '1',
     discountPercent: '0',
+    annualDiscountPercent: '0',
+    contractTemplateVersionId: '',
   });
 
   const load = useCallback(async () => {
@@ -97,6 +138,23 @@ export default function NegotiationWorkspacePage() {
       const item = await api(`/oportunidades/${oportunidadeId}`);
       setOpportunity(item);
       setAssignment({ teamId: item.teamId || '', ownerUserId: item.ownerUserId || '' });
+      const [currentTableResult, linkedTableResult, templateResult] = await Promise.all([
+        api(`/commercial/price-tables/current?customerType=${item.customerType}`).catch(() => null),
+        item.priceTableVersionId
+          ? api(`/commercial/price-tables/versions/${item.priceTableVersionId}`).catch(() => null)
+          : Promise.resolve(null),
+        api(`/commercial/contract-template-options?customerType=${item.customerType}`).catch(() => []),
+      ]);
+      const currentTable = currentTableResult?.id
+        ? currentTableResult as PriceTableVersion
+        : null;
+      const linkedTable = linkedTableResult?.id
+        ? linkedTableResult as PriceTableVersion
+        : null;
+      const table = linkedTable;
+      setCurrentPriceTable(currentTable);
+      setPriceTable(table);
+      setContractOptions(Array.isArray(templateResult) ? templateResult : templateResult.data || []);
       const snapshot = item.negotiationSnapshot || {};
       const cycle = item.cycle || snapshot.cycle || 'MONTHLY';
       let allowedBillingTypes: string[] = snapshot.allowedBillingTypes?.length
@@ -124,6 +182,15 @@ export default function NegotiationWorkspacePage() {
         discountPercent: String(
           snapshot.discounts?.find((discount: any) => discount.type === 'PERCENTAGE')?.value ?? 0,
         ),
+        annualDiscountPercent: String(
+          snapshot.pricing?.annualDiscountPercent
+          ?? table?.annualDiscountPercent
+          ?? 0,
+        ),
+        contractTemplateVersionId: item.contractTemplateVersionId
+          || snapshot.contractTemplateVersionId
+          || table?.contractTemplateVersionId
+          || '',
       });
       try {
         setEvaluation(await api(`/commercial/opportunities/${oportunidadeId}/evaluation`));
@@ -156,16 +223,39 @@ export default function NegotiationWorkspacePage() {
   }, []);
 
   const projected = useMemo(() => {
-  
-  if (!opportunity) return 0;
-    const discount = Number(form.discountPercent || 0) / 100;
-    if (opportunity.customerType === 'COMPANY') {
-      return Number(form.unitPrice || 0) * Number(form.lives || 0) * (1 - discount);
+    if (!opportunity) {
+      return {
+        monthlySubtotal: 0,
+        grossPeriodAmount: 0,
+        annualDiscountAmount: 0,
+        negotiationBaseAmount: 0,
+        commercialDiscountAmount: 0,
+        finalAmount: 0,
+        monthlyEquivalent: 0,
+      };
     }
-    return (
-      Number(form.holderAmount || 0)
-      + Number(form.dependentAmount || 0) * Number(form.dependentCount || 0)
-    ) * (1 - discount);
+    const monthlySubtotal = opportunity.customerType === 'COMPANY'
+      ? Number(form.unitPrice || 0) * Number(form.lives || 0)
+      : Number(form.holderAmount || 0)
+        + Number(form.dependentAmount || 0) * Number(form.dependentCount || 0);
+    const periodMultiplier = form.cycle === 'YEARLY' ? 12 : 1;
+    const grossPeriodAmount = monthlySubtotal * periodMultiplier;
+    const annualDiscountPercent = opportunity.customerType === 'PERSON' && form.cycle === 'YEARLY'
+      ? Number(form.annualDiscountPercent || 0)
+      : 0;
+    const annualDiscountAmount = grossPeriodAmount * annualDiscountPercent / 100;
+    const negotiationBaseAmount = grossPeriodAmount - annualDiscountAmount;
+    const commercialDiscountAmount = negotiationBaseAmount * Number(form.discountPercent || 0) / 100;
+    const finalAmount = Math.max(0, negotiationBaseAmount - commercialDiscountAmount);
+    return {
+      monthlySubtotal,
+      grossPeriodAmount,
+      annualDiscountAmount,
+      negotiationBaseAmount,
+      commercialDiscountAmount,
+      finalAmount,
+      monthlyEquivalent: form.cycle === 'YEARLY' ? finalAmount / 12 : finalAmount,
+    };
   }, [form, opportunity]);
 
   const commercialUsers = useMemo(() => users.filter(candidate =>
@@ -215,6 +305,7 @@ export default function NegotiationWorkspacePage() {
     try {
       const changes: Record<string, unknown> = {
         cycle: form.cycle,
+        annualDiscountPercent: Number(form.annualDiscountPercent || 0),
         allowedBillingTypes: form.allowedBillingTypes,
         discounts: Number(form.discountPercent) > 0
           ? [{ type: 'PERCENTAGE', value: Number(form.discountPercent), reason: revision.reason }]
@@ -265,24 +356,30 @@ export default function NegotiationWorkspacePage() {
   }
 
   function changeCycle(cycle: string) {
+    const effectiveCycle = opportunity?.customerType === 'COMPANY' ? 'MONTHLY' : cycle;
     setForm(current => {
+      const configured = priceTable
+        ? effectiveCycle === 'YEARLY'
+          ? priceTable.yearlyBillingTypes
+          : priceTable.monthlyBillingTypes
+        : current.allowedBillingTypes;
       const allowedBillingTypes = opportunity?.customerType === 'PERSON'
         ? [...new Set([
             'CREDIT_CARD',
-            ...current.allowedBillingTypes.filter(type => {
-              if (type === 'BOLETO') return cycle === 'MONTHLY';
-              if (type === 'PIX') return cycle === 'YEARLY';
+            ...configured.filter(type => {
+              if (type === 'BOLETO') return effectiveCycle === 'MONTHLY';
+              if (type === 'PIX') return effectiveCycle === 'YEARLY';
               return type === 'CREDIT_CARD';
             }),
           ])]
-        : current.allowedBillingTypes;
+        : configured;
       return {
         ...current,
-        cycle,
+        cycle: effectiveCycle,
         allowedBillingTypes,
         billingType: allowedBillingTypes.includes(current.billingType)
           ? current.billingType
-          : 'CREDIT_CARD',
+          : allowedBillingTypes[0] || 'CREDIT_CARD',
       };
     });
   }
@@ -303,6 +400,39 @@ export default function NegotiationWorkspacePage() {
     });
   }
 
+  function applyPriceTableDefaults(table: PriceTableVersion) {
+    if (!opportunity) return;
+    const cycle = opportunity.customerType === 'COMPANY'
+      ? 'MONTHLY'
+      : form.cycle === 'YEARLY'
+        ? 'YEARLY'
+        : 'MONTHLY';
+    const allowedBillingTypes = cycle === 'YEARLY'
+      ? table.yearlyBillingTypes
+      : table.monthlyBillingTypes;
+    setPriceTable(table);
+    setForm((current) => ({
+      ...current,
+      cycle,
+      holderAmount: String(table.holderAmount || 0),
+      dependentAmount: String(table.dependentAmount || 0),
+      unitPrice: String(table.unitPrice || 0),
+      lives: opportunity.customerType === 'COMPANY'
+        ? String(Math.max(1, table.minLives || 1))
+        : current.lives,
+      annualDiscountPercent: String(table.annualDiscountPercent || 0),
+      allowedBillingTypes,
+      billingType: allowedBillingTypes.includes(current.billingType)
+        ? current.billingType
+        : allowedBillingTypes[0] || 'CREDIT_CARD',
+      contractTemplateVersionId: table.contractTemplateVersionId || current.contractTemplateVersionId,
+    }));
+  }
+
+  function restorePriceTableDefaults() {
+    if (priceTable) applyPriceTableDefaults(priceTable);
+  }
+
   async function save(event: FormEvent) {
     event.preventDefault();
     if (!opportunity) return;
@@ -316,7 +446,9 @@ export default function NegotiationWorkspacePage() {
         method: 'PATCH',
         body: JSON.stringify({
           customerType: opportunity.customerType,
-          cycle: form.cycle,
+          priceTableVersionId: priceTable?.id || undefined,
+          contractTemplateVersionId: form.contractTemplateVersionId || undefined,
+          cycle: opportunity.customerType === 'COMPANY' ? 'MONTHLY' : form.cycle,
           billingType: form.billingType,
           allowedBillingTypes: form.allowedBillingTypes,
           negotiation: opportunity.customerType === 'COMPANY'
@@ -330,6 +462,7 @@ export default function NegotiationWorkspacePage() {
                 baseAmount: Number(form.holderAmount),
                 dependentAmount: Number(form.dependentAmount),
                 dependentCount: Number(form.dependentCount),
+                annualDiscountPercent: Number(form.annualDiscountPercent || 0),
                 discounts,
               },
         }),
@@ -454,7 +587,7 @@ export default function NegotiationWorkspacePage() {
                 </p>
               </div>
               <span className="rounded-full bg-brand/10 px-3 py-1 text-sm text-brand">
-                {projected.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}
+                {money(projected.finalAmount)}
               </span>
             </div>
           </section>
@@ -545,15 +678,82 @@ export default function NegotiationWorkspacePage() {
 
           <form onSubmit={save} className="rounded-xl border border-edge bg-surface-elevated p-6">
             <h2 className="text-lg font-semibold">Condições comerciais</h2>
+            {priceTable ? (
+              <div className="mt-4 rounded-xl border border-blue-200 bg-blue-50 p-4 text-sm text-blue-950">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <p className="font-semibold">
+                      Tabela vinculada {opportunity.customerType === 'PERSON' ? 'PF' : 'PJ'} — versão {priceTable.version}
+                    </p>
+                    <p className="mt-1 text-xs">
+                      {priceTable.status === 'PUBLISHED'
+                        ? 'Esta é a referência vigente. A oportunidade preserva os valores negociados no próprio histórico.'
+                        : 'Esta oportunidade permanece vinculada a uma versão histórica para preservar a origem da negociação.'}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={restorePriceTableDefaults}
+                    className="rounded-lg border border-blue-300 bg-white px-3 py-2 text-xs font-medium"
+                  >
+                    Restaurar valores desta versão
+                  </button>
+                </div>
+                {currentPriceTable && currentPriceTable.id !== priceTable.id && (
+                  <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border-t border-blue-200 pt-3">
+                    <p className="text-xs">
+                      Existe uma tabela vigente mais recente: versão {currentPriceTable.version}. A troca só acontece quando você optar por adotá-la.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => applyPriceTableDefaults(currentPriceTable)}
+                      className="rounded-lg bg-blue-700 px-3 py-2 text-xs font-medium text-white"
+                    >
+                      Adotar tabela vigente
+                    </button>
+                  </div>
+                )}
+              </div>
+            ) : currentPriceTable ? (
+              <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950">
+                <div>
+                  <p className="font-semibold">
+                    Negociação sem tabela vinculada
+                  </p>
+                  <p className="mt-1 text-xs">
+                    A tabela vigente é a versão {currentPriceTable.version}. Adotá-la substituirá os valores editados e registrará essa origem na oportunidade.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => applyPriceTableDefaults(currentPriceTable)}
+                  className="rounded-lg bg-amber-700 px-3 py-2 text-xs font-medium text-white"
+                >
+                  Adotar tabela vigente
+                </button>
+              </div>
+            ) : (
+              <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                Não existe uma tabela padrão vigente para este tipo de cliente. Os valores desta negociação serão manuais.
+              </div>
+            )}
             <div className="mt-4 grid gap-3 md:grid-cols-2">
               <label className="text-sm">
                 <span>Periodicidade</span>
-                <select value={form.cycle} onChange={e => changeCycle(e.target.value)} className="mt-1 w-full rounded-lg border px-3 py-2">
+                <select
+                  value={opportunity.customerType === 'COMPANY' ? 'MONTHLY' : form.cycle}
+                  disabled={opportunity.customerType === 'COMPANY'}
+                  onChange={e => changeCycle(e.target.value)}
+                  className="mt-1 w-full rounded-lg border px-3 py-2 disabled:bg-gray-100"
+                >
                   <option value="MONTHLY">Mensal</option>
-                  <option value="YEARLY">Anual</option>
-                  {opportunity.customerType === 'COMPANY' && <option value="QUARTERLY">Trimestral</option>}
-                  {opportunity.customerType === 'COMPANY' && <option value="SEMIANNUALLY">Semestral</option>}
+                  {opportunity.customerType === 'PERSON' && <option value="YEARLY">Anual</option>}
                 </select>
+                <small className="mt-1 block text-xs text-ink-tertiary">
+                  {opportunity.customerType === 'COMPANY'
+                    ? 'Pessoa jurídica utiliza somente cobrança mensal.'
+                    : 'A periodicidade escolhida seguirá pronta para o pré-checkout.'}
+                </small>
               </label>
               <label className="text-sm">
                 <span>Forma principal de pagamento</span>
@@ -563,6 +763,24 @@ export default function NegotiationWorkspacePage() {
                   ))}
                 </select>
               </label>
+              <label className="text-sm md:col-span-2">
+                <span>Modelo contratual</span>
+                <select
+                  required
+                  value={form.contractTemplateVersionId}
+                  onChange={e => setForm({ ...form, contractTemplateVersionId: e.target.value })}
+                  className="mt-1 w-full rounded-lg border px-3 py-2"
+                >
+                  <option value="">Selecione uma versão publicada</option>
+                  {contractOptions.map(option => (
+                    <option key={option.id} value={option.id}>{option.label}</option>
+                  ))}
+                </select>
+                <small className="mt-1 block text-xs text-ink-tertiary">
+                  O conteúdo desta versão será congelado no contrato apresentado para aceite.
+                </small>
+              </label>
+
               <fieldset className="text-sm md:col-span-2">
                 <legend>Formas permitidas no checkout</legend>
                 <div className="mt-2 flex flex-wrap gap-4">
@@ -596,9 +814,30 @@ export default function NegotiationWorkspacePage() {
                   </label>
                   <label className="text-sm">
                     <span>Quantidade de dependentes</span>
-                    <input type="number" min="0" value={form.dependentCount} onChange={e => setForm({ ...form, dependentCount: e.target.value })} className="mt-1 w-full rounded-lg border px-3 py-2" />
+                    <input
+                      type="number"
+                      min="0"
+                      max={priceTable ? priceTable.maxDependents : undefined}
+                      value={form.dependentCount}
+                      onChange={e => setForm({ ...form, dependentCount: e.target.value })}
+                      className="mt-1 w-full rounded-lg border px-3 py-2"
+                    />
                     <small className="mt-1 block text-xs text-ink-tertiary">
                       Ao gerar o pré-checkout, o sistema sincroniza esta quantidade com os dependentes efetivamente cadastrados.
+                      {priceTable ? ` Limite da tabela: ${priceTable.maxDependents}.` : ''}
+                    </small>
+                  </label>
+                  <label className="text-sm">
+                    <span>Desconto anual automático</span>
+                    <PercentageInput
+                      value={form.annualDiscountPercent}
+                      onValueChange={() => undefined}
+                      disabled
+                      className="mt-1 w-full rounded-lg border bg-gray-100 px-3 py-2"
+                      placeholder="0,00%"
+                    />
+                    <small className="mt-1 block text-xs text-ink-tertiary">
+                      Configurado na tabela de preços e aplicado somente quando a periodicidade é anual.
                     </small>
                   </label>
                 </>
@@ -610,7 +849,20 @@ export default function NegotiationWorkspacePage() {
                   </label>
                   <label className="text-sm">
                     <span>Vidas contratadas</span>
-                    <input type="number" min="1" value={form.lives} onChange={e => setForm({ ...form, lives: e.target.value })} className="mt-1 w-full rounded-lg border px-3 py-2" />
+                    <input
+                      type="number"
+                      min={priceTable?.minLives || 1}
+                      max={priceTable?.maxLives || undefined}
+                      value={form.lives}
+                      onChange={e => setForm({ ...form, lives: e.target.value })}
+                      className="mt-1 w-full rounded-lg border px-3 py-2"
+                    />
+                    {priceTable && (
+                      <small className="mt-1 block text-xs text-ink-tertiary">
+                        Faixa da tabela: {priceTable.minLives || 1}
+                        {priceTable.maxLives ? ` a ${priceTable.maxLives}` : ' ou mais'} vidas.
+                      </small>
+                    )}
                   </label>
                 </>
               )}
@@ -620,7 +872,52 @@ export default function NegotiationWorkspacePage() {
                 <PercentageInput value={form.discountPercent} onValueChange={(value) => setForm({ ...form, discountPercent: value })} className="mt-1 w-full rounded-lg border px-3 py-2" placeholder="0,00%" />
               </label>
             </div>
-            <button disabled={busy || !form.allowedBillingTypes.length} className="mt-5 rounded-lg bg-brand px-4 py-2 text-white disabled:opacity-50">
+            <div className="mt-5 rounded-xl border bg-surface-canvas/40 p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="text-sm font-medium">Estimativa da negociação</p>
+                  <p className="mt-1 text-2xl font-semibold">{money(projected.finalAmount)}</p>
+                  <p className="text-xs text-ink-tertiary">
+                    {form.cycle === 'YEARLY'
+                      ? `Total anual • equivalente a ${money(projected.monthlyEquivalent)} por mês`
+                      : 'Total mensal'}
+                  </p>
+                </div>
+                {form.cycle === 'YEARLY' && projected.annualDiscountAmount > 0 && (
+                  <span className="rounded-full bg-green-100 px-3 py-1 text-xs font-medium text-green-800">
+                    Economia anual: {money(projected.annualDiscountAmount)}
+                  </span>
+                )}
+              </div>
+              <dl className="mt-4 space-y-2 border-t pt-3 text-sm">
+                <div className="flex justify-between gap-3">
+                  <dt className="text-ink-tertiary">
+                    {form.cycle === 'YEARLY' ? 'Projeção de 12 meses' : 'Subtotal mensal'}
+                  </dt>
+                  <dd>{money(projected.grossPeriodAmount)}</dd>
+                </div>
+                {form.cycle === 'YEARLY' && (
+                  <div className="flex justify-between gap-3">
+                    <dt className="text-ink-tertiary">
+                      Desconto anual ({Number(form.annualDiscountPercent || 0)}%)
+                    </dt>
+                    <dd className="text-green-700">− {money(projected.annualDiscountAmount)}</dd>
+                  </div>
+                )}
+                {projected.commercialDiscountAmount > 0 && (
+                  <div className="flex justify-between gap-3">
+                    <dt className="text-ink-tertiary">
+                      Desconto comercial ({Number(form.discountPercent || 0)}%)
+                    </dt>
+                    <dd className="text-green-700">− {money(projected.commercialDiscountAmount)}</dd>
+                  </div>
+                )}
+              </dl>
+            </div>
+            <button
+              disabled={busy || !form.allowedBillingTypes.length || !form.contractTemplateVersionId}
+              className="mt-5 rounded-lg bg-brand px-4 py-2 text-white disabled:opacity-50"
+            >
               Salvar e recalcular
             </button>
           </form>
@@ -638,7 +935,7 @@ export default function NegotiationWorkspacePage() {
                       <p className="mt-1 text-xs text-green-700">Aprovada em {new Date(evaluation.approval.decidedAt).toLocaleString('pt-BR')}.</p>
                     )}
                   </div>
-                ) : evaluation.approval?.status === 'PENDING' ? (
+                ) : evaluation.approvalRequired && evaluation.approval?.status === 'PENDING' ? (
                   <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
                     <p className="font-semibold">Aguardando aprovação</p>
                     <p className="mt-1">Solicitação enviada: {evaluation.approval.reason}</p>
@@ -655,9 +952,7 @@ export default function NegotiationWorkspacePage() {
                     ? evaluation.policyAllowed === false
                       ? 'A negociação está liberada pela aprovação concedida.'
                       : 'Condições dentro dos limites do usuário.'
-                    : opportunity.customerType === 'COMPANY' && evaluation.policyAllowed
-                      ? 'A negociação jurídica precisa de aprovação final antes do checkout.'
-                      : 'A negociação possui exceções que exigem aprovação.'}
+                    : 'A negociação possui exceções que exigem aprovação.'}
                 </p>
                 {!!evaluation.violations?.length && evaluation.policyAllowed === false && (
                   <ul className="list-disc pl-5 text-sm text-red-700">
@@ -683,7 +978,7 @@ export default function NegotiationWorkspacePage() {
             <div className="mt-4 flex flex-wrap gap-2">
               <button
                 onClick={generatePrecheckout}
-                disabled={busy || evaluation?.approvalRequired === true || evaluation?.approval?.status === 'PENDING'}
+                disabled={busy || evaluation?.approvalRequired === true}
                 className="rounded-lg bg-brand px-4 py-2 text-sm text-white disabled:opacity-50"
               >
                 Gerar e copiar link

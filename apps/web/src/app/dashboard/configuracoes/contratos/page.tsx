@@ -408,7 +408,7 @@ export default function ContractTemplatesPage() {
                   <div key={version.id} className="flex flex-wrap items-center justify-between gap-3 rounded-lg bg-surface-canvas p-3 text-sm">
                     <div>
                       <span>Versão {version.version} · {statusLabel[version.status] || version.status}</span>
-                      {version.status === 'PUBLISHED' && <p className="mt-0.5 text-xs text-green-700">Disponível para vincular em Ofertas e preços.</p>}
+                      {version.status === 'PUBLISHED' && <p className="mt-0.5 text-xs text-green-700">Disponível para vincular em oportunidades, tabelas de preço e ofertas públicas.</p>}
                     </div>
                     <div className="flex gap-2">
                       {template.active && version.status === 'DRAFT' && (

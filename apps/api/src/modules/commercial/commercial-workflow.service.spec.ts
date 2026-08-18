@@ -75,8 +75,10 @@ function createService(options: {
     opportunityMembers,
     teamMembers,
     teams,
+    repository(), // memberships
     repository(), // offer versions
     repository(), // template versions
+    repository(), // templates
     repository(), // audit logs
     billingCustomers,
     checkoutSessions,
@@ -112,28 +114,39 @@ describe('CommercialWorkflowService', () => {
     expect(sessions.save).toHaveBeenCalledWith(expired);
   });
 
-  it('impede pré-checkout de PJ sem aprovação', async () => {
+  it('não exige aprovação de PJ quando a negociação está dentro da política', async () => {
     const opportunity = {
       id: 'opportunity-1',
       unitId: 'unit-1',
       customerType: CustomerType.COMPANY,
       commercialStatus: CommercialStatus.NEGOTIATION,
       ownerUserId: 'user-1',
-      negotiationSnapshot: {},
+      teamId: null,
+      negotiationSnapshot: {
+        customerType: CustomerType.COMPANY,
+        cycle: 'MONTHLY',
+        billingType: BillingType.CREDIT_CARD,
+        discounts: [],
+        pricing: { commercialDiscountAmount: 0, unitPrice: 40, finalAmount: 400 },
+        participants: { contractedLives: 10 },
+      },
     };
     const opportunities = repository({
       findOne: jest.fn().mockResolvedValue(opportunity),
     });
     const { service } = createService({ opportunities });
+    jest.spyOn(service as any, 'assertOpportunityAccess').mockResolvedValue(undefined);
 
-    await expect(service.createPrecheckout(
+    const result = await service.evaluateOpportunity(
       'unit-1',
       'opportunity-1',
-      7,
       'user-1',
       UnitRole.SALES,
       GlobalRole.STANDARD,
-    )).rejects.toThrow('A negociação jurídica precisa estar aprovada.');
+    );
+
+    expect(result.allowed).toBe(true);
+    expect(result.approvalRequired).toBe(false);
   });
 
   it('revoga links anteriores antes de emitir um novo link', async () => {
@@ -166,6 +179,13 @@ describe('CommercialWorkflowService', () => {
     const { service } = createService({ opportunities, sessions });
     jest.spyOn(service as any, 'assertOpportunityAccess').mockResolvedValue(undefined);
     jest.spyOn(service as any, 'audit').mockResolvedValue(undefined);
+    jest.spyOn(service as any, 'resolveTemplate').mockResolvedValue({
+      id: 'template-version-1',
+      templateId: 'template-1',
+      status: 'PUBLISHED',
+      content: 'Contrato',
+      version: 1,
+    });
 
     const result = await service.createPrecheckout(
       'unit-1',
@@ -181,6 +201,80 @@ describe('CommercialWorkflowService', () => {
     expect(result.url).toMatch(/^\/checkout\//);
   });
 
+
+  it('preserva a quantidade declarada na oferta pública ao criar o pré-checkout', async () => {
+    const opportunity = {
+      id: 'opportunity-public',
+      unitId: 'unit-1',
+      primaryPersonId: 'holder-1',
+      customerType: CustomerType.PERSON,
+      ownerUserId: null,
+      teamId: null,
+      billingCycle: 'MONTHLY',
+      billingType: BillingType.CREDIT_CARD,
+      expectedValue: '150.00',
+      negotiationSnapshot: {
+        customerType: CustomerType.PERSON,
+        cycle: 'MONTHLY',
+        billingType: BillingType.CREDIT_CARD,
+        source: 'PUBLIC_OFFER',
+        participants: { dependentCount: 2 },
+        pricing: { holderAmount: 100, dependentAmount: 25, finalAmount: 150 },
+        discounts: [],
+      },
+    };
+    const opportunities = repository({
+      findOne: jest.fn().mockResolvedValue(opportunity),
+    });
+    const sessions = repository({
+      find: jest.fn().mockResolvedValue([]),
+      save: jest.fn().mockImplementation(async value => ({ id: 'session-public', ...value })),
+    });
+    const pricing = { calculate: jest.fn() };
+    const { service } = createService({ opportunities, sessions, pricing });
+    jest.spyOn(service as any, 'audit').mockResolvedValue(undefined);
+    jest.spyOn(service as any, 'resolveTemplate').mockResolvedValue({
+      id: 'template-version-1',
+      templateId: 'template-1',
+      status: 'PUBLISHED',
+      content: 'Contrato',
+      version: 1,
+    });
+
+    await service.createPrecheckout('unit-1', 'opportunity-public');
+
+    expect(pricing.calculate).not.toHaveBeenCalled();
+    expect(sessions.save).toHaveBeenCalledWith(expect.objectContaining({
+      pricingSnapshot: expect.objectContaining({
+        source: 'PUBLIC_OFFER',
+        participants: { dependentCount: 2 },
+        pricing: expect.objectContaining({ finalAmount: 150 }),
+      }),
+    }));
+  });
+
+  it('bloqueia alteração de dependentes no pré-checkout de negociação interna', async () => {
+    const session = {
+      id: 'session-internal',
+      unitId: 'unit-1',
+      opportunityId: 'opportunity-1',
+      tokenHash: 'hash',
+      status: PrecheckoutStatus.CREATED,
+      revokedAt: null,
+      expiresAt: new Date(Date.now() + 60_000),
+      pricingSnapshot: { source: 'DEFAULT_PRICE_TABLE' },
+    };
+    const sessions = repository({
+      findOne: jest.fn().mockResolvedValue(session),
+    });
+    const { service } = createService({ sessions });
+    jest.spyOn(service as any, 'hash').mockReturnValue('hash');
+
+    await expect(service.addParticipant('token', {
+      name: 'Dependente',
+      taxId: '11144477735',
+    })).rejects.toBeInstanceOf(BadRequestException);
+  });
 
   it('leva dependentes cadastrados e o valor recalculado para o pré-checkout PF', async () => {
     const opportunity = {
@@ -244,6 +338,13 @@ describe('CommercialWorkflowService', () => {
     const { service } = createService({ opportunities, people, opportunityMembers, participants, sessions, pricing });
     jest.spyOn(service as any, 'assertOpportunityAccess').mockResolvedValue(undefined);
     jest.spyOn(service as any, 'audit').mockResolvedValue(undefined);
+    jest.spyOn(service as any, 'resolveTemplate').mockResolvedValue({
+      id: 'template-version-1',
+      templateId: 'template-1',
+      status: 'PUBLISHED',
+      content: 'Contrato',
+      version: 1,
+    });
 
     await service.createPrecheckout('unit-1', 'opportunity-1', 7, 'user-1', UnitRole.SALES, GlobalRole.STANDARD);
 

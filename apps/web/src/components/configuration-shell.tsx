@@ -9,8 +9,8 @@ const sections = [
     label: 'Comercial',
     items: [
       { href: '/dashboard/configuracoes', label: 'Visão geral', description: 'Resumo das configurações da sede', exact: true },
-      { href: '/dashboard/configuracoes/comercial', label: 'Políticas comerciais', description: 'Alçadas, limites e aprovações' },
-      { href: '/dashboard/configuracoes/ofertas', label: 'Ofertas e preços', description: 'Produtos, preços e versões vigentes' },
+      { href: '/dashboard/configuracoes/comercial', label: 'Preços e políticas', description: 'Referências, alçadas e aprovações' },
+      { href: '/dashboard/configuracoes/ofertas', label: 'Ofertas públicas', description: 'Links de contratação autônoma' },
       { href: '/dashboard/configuracoes/funis', label: 'Funis comerciais', description: 'Etapas do Kanban e automações' },
       { href: '/dashboard/configuracoes/contratos', label: 'Modelos contratuais', description: 'Textos, variáveis e versões' },
     ],
@@ -28,7 +28,7 @@ export default function ConfigurationShell({ children }: { children: ReactNode }
 
   return (
     <div className="mx-auto flex w-full max-w-[1680px] items-start gap-6 px-6 py-6">
-      <aside className="sticky top-20 hidden w-64 shrink-0 rounded-xl border border-edge bg-surface-elevated p-3 xl:block">
+      <aside className="sticky top-20 hidden max-h-[calc(100vh-6rem)] w-64 shrink-0 self-start overflow-y-auto rounded-xl border border-edge bg-surface-elevated p-3 xl:block">
         <div className="px-3 pb-3 pt-2">
           <p className="text-xs font-semibold uppercase tracking-wide text-ink-tertiary">Configurações da sede</p>
           <p className="mt-1 text-sm text-ink-secondary">Organize regras comerciais e integrações.</p>

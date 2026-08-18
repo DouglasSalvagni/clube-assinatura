@@ -3,9 +3,9 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { createHash, randomBytes } from 'crypto';
 import { In, Repository } from 'typeorm';
 import {
-  ApprovalRequest, ApprovalStatus, AuditLog, BillingCustomer, BillingProviderName, BillingType, CheckoutSession,
+  ApprovalRequest, ApprovalStatus, AuditLog, BillingCustomer, BillingCycle, BillingProviderName, BillingType, CheckoutSession,
   CheckoutStatus, CommercialOfferVersion, CommercialStatus, Contract, ContractAcceptance, ContractRelationType, ContractStatus,
-  ContractTemplateStatus, ContractTemplateVersion, CustomerType, GlobalRole, MemberRole, NegotiationPolicy, Opportunity,
+  ContractTemplate, ContractTemplateStatus, ContractTemplateVersion, CustomerType, GlobalRole, MemberRole, Membership, NegotiationPolicy, Opportunity,
   OpportunityMember, OpportunityStatus, Person, PersonKind, PrecheckoutParticipant, PrecheckoutSession,
   PrecheckoutStatus, Subscription, Team, TeamMember, UnitRole,
 } from '../../database/entities';
@@ -33,8 +33,10 @@ export class CommercialWorkflowService {
     @InjectRepository(OpportunityMember) private readonly opportunityMembers: Repository<OpportunityMember>,
     @InjectRepository(TeamMember) private readonly teamMembers: Repository<TeamMember>,
     @InjectRepository(Team) private readonly teams: Repository<Team>,
+    @InjectRepository(Membership) private readonly memberships: Repository<Membership>,
     @InjectRepository(CommercialOfferVersion) private readonly offerVersions: Repository<CommercialOfferVersion>,
     @InjectRepository(ContractTemplateVersion) private readonly templateVersions: Repository<ContractTemplateVersion>,
+    @InjectRepository(ContractTemplate) private readonly templates: Repository<ContractTemplate>,
     @InjectRepository(AuditLog) private readonly auditLogs: Repository<AuditLog>,
     @InjectRepository(BillingCustomer) private readonly billingCustomers: Repository<BillingCustomer>,
     @InjectRepository(CheckoutSession) private readonly checkoutSessions: Repository<CheckoutSession>,
@@ -54,16 +56,51 @@ export class CommercialWorkflowService {
   async savePolicy(unitId: string, dto: CreatePolicyDto, id?: string, actorUserId?: string) {
     const current = id ? await this.policies.findOne({ where: { unitId, id } }) : null;
     if (id && !current) throw new NotFoundException('Política não encontrada.');
+
+    const selectedTargets = [dto.targetRole, dto.targetUserId, dto.targetTeamId].filter(Boolean);
+    if (selectedTargets.length > 1) {
+      throw new BadRequestException('Escolha apenas um escopo: perfil, time ou usuário específico.');
+    }
+    if (dto.targetTeamId && !await this.teams.exists({ where: { unitId, id: dto.targetTeamId, active: true } })) {
+      throw new BadRequestException('O time selecionado não pertence à sede ou está inativo.');
+    }
+    if (dto.targetUserId) {
+      const membership = await this.memberships.findOne({
+        where: { unitId, userId: dto.targetUserId, active: true },
+      });
+      if (!membership) {
+        throw new BadRequestException('O usuário selecionado não pertence à sede ou está inativo.');
+      }
+      if (![UnitRole.OWNER, UnitRole.ADMIN, UnitRole.MANAGER, UnitRole.SALES].includes(membership.role)) {
+        throw new BadRequestException('A política individual exige um usuário com perfil comercial.');
+      }
+    }
+
     const before = current ? this.policySnapshot(current) : null;
     const entity = current || this.policies.create({ unitId, archivedAt: null });
     const rules = { ...(dto.rules || {}) };
     const customerType = dto.customerType || null;
     if (customerType === CustomerType.PERSON) delete rules.maxLives;
+    if (Array.isArray(rules.allowedBillingCycles)) {
+      const cycles = [...new Set(rules.allowedBillingCycles)];
+      if (!cycles.length) {
+        throw new BadRequestException('Selecione ao menos uma periodicidade permitida.');
+      }
+      if (cycles.some((cycle) => ![BillingCycle.MONTHLY, BillingCycle.YEARLY].includes(cycle))) {
+        throw new BadRequestException('A política aceita somente periodicidade mensal ou anual.');
+      }
+      if (customerType === CustomerType.COMPANY
+        && (cycles.length !== 1 || cycles[0] !== BillingCycle.MONTHLY)) {
+        throw new BadRequestException('Políticas de pessoa jurídica devem permitir somente cobrança mensal.');
+      }
+      rules.allowedBillingCycles = cycles;
+    }
     Object.assign(entity, {
       name: dto.name,
       customerType,
       targetRole: dto.targetRole || null,
       targetUserId: dto.targetUserId || null,
+      targetTeamId: dto.targetTeamId || null,
       maxDiscountPercent: Number(dto.maxDiscountPercent || 0).toFixed(2),
       maxDiscountAmount: dto.maxDiscountAmount == null ? null : Number(dto.maxDiscountAmount).toFixed(2),
       minUnitPrice: customerType === CustomerType.PERSON || dto.minUnitPrice == null
@@ -136,6 +173,7 @@ export class CommercialWorkflowService {
       customerType: policy.customerType,
       targetRole: policy.targetRole,
       targetUserId: policy.targetUserId,
+      targetTeamId: policy.targetTeamId,
       maxDiscountPercent: policy.maxDiscountPercent,
       maxDiscountAmount: policy.maxDiscountAmount,
       minUnitPrice: policy.minUnitPrice,
@@ -152,9 +190,10 @@ export class CommercialWorkflowService {
     role: UnitRole | null,
     negotiation: any,
     customerType?: CustomerType,
+    teamId?: string | null,
   ) {
     const policies = await this.policies.find({ where: { unitId, active: true } });
-    return evaluateNegotiationPolicies(policies, userId, role, {
+    return evaluateNegotiationPolicies(policies, userId, role, teamId || null, {
       ...(negotiation || {}),
       customerType: negotiation?.customerType || customerType || null,
     });
@@ -170,17 +209,36 @@ export class CommercialWorkflowService {
     const opportunity = await this.opportunities.findOne({ where: { unitId, id: opportunityId } });
     if (!opportunity) throw new NotFoundException('Oportunidade não encontrada.');
     await this.assertOpportunityAccess(opportunity, userId, role, globalRole);
-    const evaluation = await this.evaluate(unitId, userId, role, opportunity.negotiationSnapshot, opportunity.customerType);
-    const approval = await this.currentApproval(unitId, opportunityId, opportunity.negotiationSnapshot);
+    const subject = await this.policySubject(opportunity, userId, role);
+    const evaluation = await this.evaluate(
+      unitId,
+      subject.userId,
+      subject.role,
+      opportunity.negotiationSnapshot,
+      opportunity.customerType,
+      opportunity.teamId,
+    );
+    let approval = await this.currentApproval(unitId, opportunityId, opportunity.negotiationSnapshot);
+
+    if (evaluation.allowed && approval?.status === ApprovalStatus.PENDING) {
+      await this.approvals.update(
+        { id: approval.id, unitId },
+        { status: ApprovalStatus.CANCELLED },
+      );
+      approval = { ...approval, status: ApprovalStatus.CANCELLED };
+
+      if (opportunity.commercialStatus === CommercialStatus.PENDING_APPROVAL) {
+        opportunity.commercialStatus = CommercialStatus.NEGOTIATION;
+        await this.opportunities.save(opportunity);
+      }
+    }
+
     const approvedException = approval?.status === ApprovalStatus.APPROVED;
-    const companyApprovalRequired = opportunity.customerType === CustomerType.COMPANY && !approvedException;
     return {
       ...evaluation,
       policyAllowed: evaluation.allowed,
-      allowed: opportunity.customerType === CustomerType.COMPANY
-        ? approvedException
-        : evaluation.allowed || approvedException,
-      approvalRequired: companyApprovalRequired || (!evaluation.allowed && !approvedException),
+      allowed: evaluation.allowed || approvedException,
+      approvalRequired: !evaluation.allowed && !approvedException,
       approval,
     };
   }
@@ -189,8 +247,16 @@ export class CommercialWorkflowService {
     const opportunity = await this.opportunities.findOne({ where: { unitId, id: opportunityId } });
     if (!opportunity) throw new NotFoundException('Oportunidade não encontrada.');
     await this.assertOpportunityAccess(opportunity, userId, role, GlobalRole.STANDARD);
-    const evaluation = await this.evaluate(unitId, userId, role, opportunity.negotiationSnapshot, opportunity.customerType);
-    if (evaluation.allowed && opportunity.customerType !== CustomerType.COMPANY) {
+    const subject = await this.policySubject(opportunity, userId, role);
+    const evaluation = await this.evaluate(
+      unitId,
+      subject.userId,
+      subject.role,
+      opportunity.negotiationSnapshot,
+      opportunity.customerType,
+      opportunity.teamId,
+    );
+    if (evaluation.allowed) {
       throw new BadRequestException('A negociação está dentro dos limites e não exige aprovação.');
     }
     const current = await this.currentApproval(unitId, opportunityId, opportunity.negotiationSnapshot);
@@ -218,7 +284,7 @@ export class CommercialWorkflowService {
     if (approval.status !== ApprovalStatus.PENDING) throw new ConflictException('Solicitação já decidida.');
     const opportunity = await this.opportunities.findOneByOrFail({ unitId, id: approval.opportunityId });
     if (dto.decision === 'APPROVED'
-      && this.canonical(opportunity.negotiationSnapshot || {}) !== this.canonical(approval.requestedConditions || {})) {
+      && this.canonical(this.approvalTerms(opportunity.negotiationSnapshot || {})) !== this.canonical(this.approvalTerms(approval.requestedConditions || {}))) {
       throw new ConflictException('As condições da negociação mudaram após a solicitação. Gere uma nova aprovação.');
     }
     approval.status = dto.decision === 'APPROVED' ? ApprovalStatus.APPROVED : ApprovalStatus.REJECTED;
@@ -313,6 +379,7 @@ export class CommercialWorkflowService {
       lives: opportunity.customerType === CustomerType.COMPANY
         ? Number(changes.lives ?? currentParticipants.contractedLives ?? 1)
         : undefined,
+      annualDiscountPercent: Number(changes.annualDiscountPercent ?? currentPricing.annualDiscountPercent ?? 0),
       discounts: changes.discounts ?? currentNegotiation.discounts ?? [],
     });
     const negotiation = {
@@ -320,7 +387,15 @@ export class CommercialWorkflowService {
       allowedBillingTypes,
       revisionEffectiveAt: changes.effectiveAt || new Date().toISOString().slice(0, 10),
     };
-    const policyEvaluation = await this.evaluate(unitId, userId, role, negotiation);
+    const subject = await this.policySubject(opportunity, userId, role);
+    const policyEvaluation = await this.evaluate(
+      unitId,
+      subject.userId,
+      subject.role,
+      negotiation,
+      opportunity.customerType,
+      opportunity.teamId,
+    );
     if (!policyEvaluation.allowed && ![UnitRole.OWNER, UnitRole.ADMIN, UnitRole.MANAGER].includes(role as UnitRole)
       && globalRole !== GlobalRole.INSTALLATION_ADMIN) {
       throw new BadRequestException({
@@ -428,21 +503,27 @@ export class CommercialWorkflowService {
     };
   }
 
-  async createPrecheckout(unitId: string, opportunityId: string, expiresInDays = 7, userId?: string, role?: UnitRole | null, globalRole?: GlobalRole) {
+  async createPrecheckout(
+    unitId: string,
+    opportunityId: string,
+    expiresInDays = 7,
+    userId?: string,
+    role?: UnitRole | null,
+    globalRole?: GlobalRole,
+  ) {
     await this.feature.assertEnabled(unitId);
     const opportunity = await this.opportunities.findOne({ where: { unitId, id: opportunityId } });
     if (!opportunity) throw new NotFoundException('Oportunidade não encontrada.');
     if (userId) {
-      await this.assertOpportunityAccess(opportunity, userId, role || null, globalRole || GlobalRole.STANDARD);
-      const evaluation = await this.evaluate(unitId, userId, role || null, opportunity.negotiationSnapshot, opportunity.customerType);
-      const approval = await this.currentApproval(unitId, opportunityId, opportunity.negotiationSnapshot);
-      const hasApprovedException = approval?.status === ApprovalStatus.APPROVED;
-      if (!evaluation.allowed && !hasApprovedException) {
-        throw new BadRequestException('A negociação possui condições sem aprovação válida.');
-      }
-      if (opportunity.customerType === CustomerType.COMPANY && !hasApprovedException) {
-        throw new BadRequestException('A negociação jurídica precisa estar aprovada.');
-      }
+      await this.assertOpportunityAccess(
+        opportunity,
+        userId,
+        role || null,
+        globalRole || GlobalRole.STANDARD,
+      );
+    }
+    if (!await this.resolveTemplate(opportunity)) {
+      throw new BadRequestException('Selecione um modelo contratual publicado antes de gerar o pré-checkout.');
     }
 
     const previousSessions = await this.sessions.find({ where: { unitId, opportunityId } });
@@ -474,16 +555,37 @@ export class CommercialWorkflowService {
       : [];
 
     let pricingSnapshot = opportunity.negotiationSnapshot || {};
-    if (opportunity.customerType === CustomerType.PERSON && pricingSnapshot?.pricing) {
+    const configuredMaxDependents = Number(pricingSnapshot?.limits?.maxDependents);
+    if (opportunity.customerType === CustomerType.PERSON
+      && Number.isFinite(configuredMaxDependents)
+      && configuredMaxDependents >= 0
+      && opportunityDependents.length > configuredMaxDependents) {
+      throw new BadRequestException(
+        `A negociação permite no máximo ${configuredMaxDependents} dependentes.`,
+      );
+    }
+    const participantEditingAllowed = pricingSnapshot?.source === 'PUBLIC_OFFER';
+    if (opportunity.customerType === CustomerType.PERSON
+      && pricingSnapshot?.pricing
+      && !participantEditingAllowed) {
       const cycle = pricingSnapshot.cycle || opportunity.billingCycle;
       if (cycle) {
         const calculation = this.pricing.calculate({
           customerType: CustomerType.PERSON,
           cycle,
-          billingType: pricingSnapshot.billingType || opportunity.billingType,
-          baseAmount: Number(pricingSnapshot.pricing.holderAmount ?? pricingSnapshot.pricing.baseAmount ?? 0),
+          billingType: pricingSnapshot.billingType || opportunity.billingType || undefined,
+          baseAmount: Number(
+            pricingSnapshot.pricing.holderAmount
+            ?? pricingSnapshot.pricing.baseAmount
+            ?? 0,
+          ),
           dependentAmount: Number(pricingSnapshot.pricing.dependentAmount ?? 0),
           dependentCount: opportunityDependents.length,
+          annualDiscountPercent: Number(
+            pricingSnapshot.pricing.annualDiscountPercent
+            ?? pricingSnapshot.annualDiscountPercent
+            ?? 0,
+          ),
           discounts: pricingSnapshot.discounts || [],
         });
         pricingSnapshot = {
@@ -491,12 +593,35 @@ export class CommercialWorkflowService {
           allowedBillingTypes: pricingSnapshot.allowedBillingTypes,
           limits: pricingSnapshot.limits,
           offer: pricingSnapshot.offer,
+          priceTable: pricingSnapshot.priceTable,
+          contractTemplateVersionId: opportunity.contractTemplateVersionId
+            || pricingSnapshot.contractTemplateVersionId
+            || null,
           source: pricingSnapshot.source,
-          policyEvaluation: pricingSnapshot.policyEvaluation,
         };
         opportunity.negotiationSnapshot = pricingSnapshot;
         opportunity.expectedValue = Number(calculation.pricing.finalAmount).toFixed(2);
+        opportunity.billingCycle = calculation.cycle;
+        opportunity.billingType = calculation.billingType || opportunity.billingType;
         await this.opportunities.save(opportunity);
+      }
+    }
+
+    // A política é avaliada sobre os valores finais e a quantidade real de participantes.
+    if (userId) {
+      const subject = await this.policySubject(opportunity, userId, role || null);
+      const evaluation = await this.evaluate(
+        unitId,
+        subject.userId,
+        subject.role,
+        pricingSnapshot,
+        opportunity.customerType,
+        opportunity.teamId,
+      );
+      const approval = await this.currentApproval(unitId, opportunityId, pricingSnapshot);
+      const hasApprovedException = approval?.status === ApprovalStatus.APPROVED;
+      if (!evaluation.allowed && !hasApprovedException) {
+        throw new BadRequestException('A negociação possui condições sem aprovação válida.');
       }
     }
 
@@ -545,6 +670,7 @@ export class CommercialWorkflowService {
       expiresAt: session.expiresAt,
       prefilledDependents: opportunityDependents.length,
       finalAmount: pricingSnapshot?.pricing?.finalAmount ?? opportunity.expectedValue,
+      contractTemplateVersionId: opportunity.contractTemplateVersionId,
     });
     return { id: session.id, token, expiresAt: session.expiresAt, url: `/checkout/${token}` };
   }
@@ -594,16 +720,57 @@ export class CommercialWorkflowService {
 
   async publicGet(token: string) {
     const session = await this.byToken(token);
-    const opportunity = await this.opportunities.findOneByOrFail({ id: session.opportunityId, unitId: session.unitId });
-    const person = await this.people.findOneByOrFail({ id: opportunity.primaryPersonId, unitId: session.unitId });
-    const participants = await this.participants.find({ where: { precheckoutSessionId: session.id, unitId: session.unitId } });
-    const contract = session.contractId ? await this.contracts.findOne({ where: { id: session.contractId, unitId: session.unitId } }) : null;
+    const opportunity = await this.opportunities.findOneByOrFail({
+      id: session.opportunityId,
+      unitId: session.unitId,
+    });
+    const person = await this.people.findOneByOrFail({
+      id: opportunity.primaryPersonId,
+      unitId: session.unitId,
+    });
+    const participants = await this.participants.find({
+      where: { precheckoutSessionId: session.id, unitId: session.unitId },
+    });
+    const contract = session.contractId
+      ? await this.contracts.findOne({ where: { id: session.contractId, unitId: session.unitId } })
+      : null;
+    const selectedTemplateVersionId = contract?.templateVersionId
+      || opportunity.contractTemplateVersionId
+      || opportunity.negotiationSnapshot?.contractTemplateVersionId
+      || null;
+    const templateVersion = selectedTemplateVersionId
+      ? await this.templateVersions.findOne({
+          where: { id: selectedTemplateVersionId, unitId: session.unitId },
+        })
+      : null;
+    const template = templateVersion
+      ? await this.templates.findOne({
+          where: { id: templateVersion.templateId, unitId: session.unitId },
+        })
+      : null;
+    const contractTemplate = templateVersion && template ? {
+      id: template.id,
+      name: template.name,
+      code: template.code,
+      versionId: templateVersion.id,
+      version: templateVersion.version,
+    } : null;
+
     return {
       status: session.status,
       expiresAt: session.expiresAt,
       customerType: opportunity.customerType,
-      customer: { name: person.name, taxId: person.taxId, email: person.email, phone: person.phone, ...session.customerData },
+      participantEditingAllowed: opportunity.customerType === CustomerType.PERSON
+        && session.pricingSnapshot?.source === 'PUBLIC_OFFER',
+      customer: {
+        name: person.name,
+        taxId: person.taxId,
+        email: person.email,
+        phone: person.phone,
+        ...session.customerData,
+      },
       pricing: session.pricingSnapshot,
+      contractTemplate,
       allowedBillingTypes: session.pricingSnapshot?.allowedBillingTypes
         || opportunity.negotiationSnapshot?.allowedBillingTypes
         || (opportunity.billingType ? [opportunity.billingType] : [BillingType.CREDIT_CARD]),
@@ -617,6 +784,10 @@ export class CommercialWorkflowService {
         parentContractId: contract.parentContractId,
         requiresPayment: contract.requiresPayment,
         changeReason: contract.changeReason,
+        templateName: template?.name || null,
+        templateCode: template?.code || contract.templateCode,
+        templateVersion: templateVersion?.version || null,
+        templateVersionId: contract.templateVersionId,
       },
     };
   }
@@ -698,6 +869,11 @@ export class CommercialWorkflowService {
 
   async addParticipant(token: string, dto: PrecheckoutParticipantDto) {
     const session = await this.byToken(token);
+    if (session.pricingSnapshot?.source !== 'PUBLIC_OFFER') {
+      throw new BadRequestException(
+        'A quantidade de dependentes foi definida na negociação e não pode ser alterada no pré-checkout.',
+      );
+    }
     await this.ensureEditable(session);
     const opportunity = await this.opportunities.findOneByOrFail({ id: session.opportunityId, unitId: session.unitId });
     if (opportunity.customerType !== CustomerType.PERSON) throw new BadRequestException('Beneficiários empresariais serão cadastrados após a contratação.');
@@ -713,6 +889,11 @@ export class CommercialWorkflowService {
 
   async removeParticipant(token: string, participantId: string) {
     const session = await this.byToken(token);
+    if (session.pricingSnapshot?.source !== 'PUBLIC_OFFER') {
+      throw new BadRequestException(
+        'A quantidade de dependentes foi definida na negociação e não pode ser alterada no pré-checkout.',
+      );
+    }
     await this.ensureEditable(session);
     await this.participants.delete({ id: participantId, precheckoutSessionId: session.id, unitId: session.unitId });
     await this.reprice(session);
@@ -726,17 +907,33 @@ export class CommercialWorkflowService {
       const calculation = this.pricing.calculate({
         customerType: CustomerType.PERSON, cycle: current.cycle, billingType: current.billingType,
         baseAmount: Number(current.pricing?.holderAmount || current.pricing?.baseAmount || 0),
-        dependentAmount: Number(current.pricing?.dependentAmount || 0), dependentCount: count, discounts: current.discounts || [],
+        dependentAmount: Number(current.pricing?.dependentAmount || 0),
+        dependentCount: count,
+        annualDiscountPercent: Number(current.pricing?.annualDiscountPercent || 0),
+        discounts: current.discounts || [],
       });
       session.pricingSnapshot = {
         ...calculation,
         allowedBillingTypes: current.allowedBillingTypes,
         limits: current.limits,
         offer: current.offer,
+        priceTable: current.priceTable,
+        contractTemplateVersionId: current.contractTemplateVersionId,
         source: current.source,
         policyEvaluation: current.policyEvaluation,
       };
       await this.sessions.save(session);
+
+      const opportunity = await this.opportunities.findOne({
+        where: { id: session.opportunityId, unitId: session.unitId },
+      });
+      if (opportunity) {
+        opportunity.negotiationSnapshot = session.pricingSnapshot;
+        opportunity.expectedValue = Number(calculation.pricing.finalAmount).toFixed(2);
+        opportunity.billingCycle = calculation.cycle;
+        opportunity.billingType = calculation.billingType || opportunity.billingType;
+        await this.opportunities.save(opportunity);
+      }
     }
   }
 
@@ -758,7 +955,7 @@ export class CommercialWorkflowService {
       where: { precheckoutSessionId: session.id, unitId: session.unitId },
       order: { createdAt: 'ASC' },
     });
-    const snapshot = {
+    const snapshot: Record<string, any> = {
       customer: session.customerData,
       participants,
       negotiation: session.pricingSnapshot,
@@ -766,7 +963,23 @@ export class CommercialWorkflowService {
       generatedAt: new Date().toISOString(),
     };
     const template = await this.resolveTemplate(opportunity);
-    const content = template ? this.renderTemplate(template.content, snapshot) : this.render(snapshot);
+    if (!template) {
+      throw new BadRequestException('Nenhum modelo contratual foi selecionado para esta contratação.');
+    }
+    const templateEntity = await this.templates.findOne({
+      where: { id: template.templateId, unitId: session.unitId },
+    });
+    if (!templateEntity) {
+      throw new BadRequestException('O modelo contratual selecionado não está disponível.');
+    }
+    snapshot.contractTemplate = {
+      id: templateEntity.id,
+      name: templateEntity.name,
+      code: templateEntity.code,
+      versionId: template.id,
+      version: template.version,
+    };
+    const content = this.renderTemplate(template.content, snapshot);
     const hash = this.hash(content);
     const previous = await this.contracts.find({
       where: { unitId: session.unitId, opportunityId: session.opportunityId },
@@ -784,7 +997,7 @@ export class CommercialWorkflowService {
       requiresPayment: true,
       version: previous.length + 1,
       status: ContractStatus.READY,
-      templateCode: template ? `TEMPLATE_VERSION_${template.id}` : 'DEFAULT',
+      templateCode: templateEntity?.code || (template ? `TEMPLATE_VERSION_${template.id}` : 'DEFAULT'),
       templateVersionId: template?.id || null,
       snapshot,
       renderedContent: content,
@@ -1137,6 +1350,17 @@ As demais cláusulas do contrato de origem permanecem inalteradas.`;
   }
 
   private async resolveTemplate(opportunity: Opportunity) {
+    const selectedVersionId = opportunity.contractTemplateVersionId
+      || opportunity.negotiationSnapshot?.contractTemplateVersionId
+      || null;
+    if (selectedVersionId) {
+      const selected = await this.templateVersions.findOne({
+        where: { id: selectedVersionId, unitId: opportunity.unitId },
+      });
+      if (selected?.status === ContractTemplateStatus.PUBLISHED) return selected;
+      throw new BadRequestException('O modelo contratual selecionado não está mais publicado.');
+    }
+
     if (opportunity.offerVersionId) {
       const offerVersion = await this.offerVersions.findOne({
         where: { id: opportunity.offerVersionId, unitId: opportunity.unitId },
@@ -1212,16 +1436,60 @@ As demais cláusulas do contrato de origem permanecem inalteradas.`;
     }
   }
 
+  private async policySubject(
+    opportunity: Opportunity,
+    fallbackUserId: string,
+    fallbackRole: UnitRole | null,
+  ) {
+    const subjectUserId = opportunity.ownerUserId || fallbackUserId;
+    if (subjectUserId === fallbackUserId) {
+      return { userId: subjectUserId, role: fallbackRole };
+    }
+    const membership = await this.memberships.findOne({
+      where: {
+        unitId: opportunity.unitId,
+        userId: subjectUserId,
+        active: true,
+      },
+    });
+    return {
+      userId: subjectUserId,
+      role: membership?.role || fallbackRole,
+    };
+  }
+
   private async currentApproval(unitId: string, opportunityId: string, snapshot: Record<string, any>) {
     const approvals = await this.approvals.find({
       where: { unitId, opportunityId },
       order: { createdAt: 'DESC' },
     });
-    const currentSnapshot = this.canonical(snapshot || {});
+    const currentSnapshot = this.canonical(this.approvalTerms(snapshot || {}));
     return approvals.find((approval) =>
       approval.status !== ApprovalStatus.CANCELLED
-      && this.canonical(approval.requestedConditions || {}) === currentSnapshot,
+      && this.canonical(this.approvalTerms(approval.requestedConditions || {})) === currentSnapshot,
     ) || null;
+  }
+
+  private approvalTerms(snapshot: Record<string, any>) {
+    return {
+      customerType: snapshot?.customerType || null,
+      cycle: snapshot?.cycle || null,
+      billingType: snapshot?.billingType || null,
+      allowedBillingTypes: [...(snapshot?.allowedBillingTypes || [])].sort(),
+      participants: snapshot?.participants || null,
+      pricing: snapshot?.pricing ? {
+        holderAmount: snapshot.pricing.holderAmount,
+        dependentAmount: snapshot.pricing.dependentAmount,
+        unitPrice: snapshot.pricing.unitPrice,
+        grossPeriodAmount: snapshot.pricing.grossPeriodAmount,
+        annualDiscountPercent: snapshot.pricing.annualDiscountPercent,
+        negotiationBaseAmount: snapshot.pricing.negotiationBaseAmount,
+        commercialDiscountAmount: snapshot.pricing.commercialDiscountAmount,
+        finalAmount: snapshot.pricing.finalAmount,
+      } : null,
+      discounts: snapshot?.discounts || [],
+      contractTemplateVersionId: snapshot?.contractTemplateVersionId || null,
+    };
   }
 
   private canonical(value: any): string {
