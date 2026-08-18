@@ -84,7 +84,13 @@ function createService(options: {
     checkoutSessions,
     subscriptions,
     options.pricing || { calculate: jest.fn() } as any,
-    options.asaas || { createCheckout: jest.fn() } as any,
+    options.asaas || {
+      createCustomer: jest.fn(),
+      updateCustomer: jest.fn(),
+      createCheckout: jest.fn(),
+      createSubscription: jest.fn(),
+      subscriptionPayments: jest.fn(),
+    } as any,
     options.feature || { assertEnabled: jest.fn() },
   );
   return {
@@ -253,7 +259,7 @@ describe('CommercialWorkflowService', () => {
     }));
   });
 
-  it('bloqueia alteração de dependentes no pré-checkout de negociação interna', async () => {
+  it('permite cadastrar os dados dos dependentes sem alterar a negociação interna', async () => {
     const session = {
       id: 'session-internal',
       unitId: 'unit-1',
@@ -262,21 +268,40 @@ describe('CommercialWorkflowService', () => {
       status: PrecheckoutStatus.CREATED,
       revokedAt: null,
       expiresAt: new Date(Date.now() + 60_000),
-      pricingSnapshot: { source: 'DEFAULT_PRICE_TABLE' },
+      pricingSnapshot: {
+        source: 'DEFAULT_PRICE_TABLE',
+        participants: { dependentCount: 3 },
+      },
     };
     const sessions = repository({
       findOne: jest.fn().mockResolvedValue(session),
     });
-    const { service } = createService({ sessions });
+    const opportunities = repository({
+      findOneByOrFail: jest.fn().mockResolvedValue({
+        id: 'opportunity-1',
+        unitId: 'unit-1',
+        customerType: CustomerType.PERSON,
+      }),
+    });
+    const participants = repository({
+      count: jest.fn().mockResolvedValue(0),
+      save: jest.fn().mockImplementation(async value => ({ id: 'participant-1', ...value })),
+    });
+    const pricing = { calculate: jest.fn() };
+    const { service } = createService({ sessions, opportunities, participants, pricing });
     jest.spyOn(service as any, 'hash').mockReturnValue('hash');
+    jest.spyOn(service, 'publicGet').mockResolvedValue({} as any);
 
-    await expect(service.addParticipant('token', {
+    await service.addParticipant('token', {
       name: 'Dependente',
       taxId: '11144477735',
-    })).rejects.toBeInstanceOf(BadRequestException);
+    });
+
+    expect(participants.save).toHaveBeenCalled();
+    expect(pricing.calculate).not.toHaveBeenCalled();
   });
 
-  it('leva dependentes cadastrados e o valor recalculado para o pré-checkout PF', async () => {
+  it('usa a negociação como fonte de verdade mesmo que a oportunidade tenha outra quantidade de dependentes', async () => {
     const opportunity = {
       id: 'opportunity-1',
       unitId: 'unit-1',
@@ -286,20 +311,20 @@ describe('CommercialWorkflowService', () => {
       ownerUserId: 'user-1',
       billingCycle: 'MONTHLY',
       billingType: BillingType.CREDIT_CARD,
-      expectedValue: '100.00',
+      expectedValue: '175.00',
       negotiationSnapshot: {
         customerType: CustomerType.PERSON,
         cycle: 'MONTHLY',
         billingType: BillingType.CREDIT_CARD,
         allowedBillingTypes: [BillingType.CREDIT_CARD],
-        participants: { dependentCount: 0 },
-        pricing: { holderAmount: 100, dependentAmount: 25, finalAmount: 100 },
+        participants: { dependentCount: 3 },
+        pricing: { holderAmount: 100, dependentAmount: 25, finalAmount: 175 },
         discounts: [],
       },
     };
-    const opportunities = repository({
-      findOne: jest.fn().mockResolvedValue(opportunity),
-      save: jest.fn().mockImplementation(async value => value),
+    const opportunities = repository({ findOne: jest.fn().mockResolvedValue(opportunity) });
+    const opportunityMembers = repository({
+      find: jest.fn().mockResolvedValue([]),
     });
     const people = repository({
       findOneByOrFail: jest.fn().mockResolvedValue({
@@ -307,35 +332,14 @@ describe('CommercialWorkflowService', () => {
         phone: '51999999999', whatsapp: null, postalCode: '90000000', address: 'Rua A',
         addressNumber: '100', complement: null, district: 'Centro', city: 'Porto Alegre', state: 'RS',
       }),
-      find: jest.fn().mockResolvedValue([
-        { id: 'dependent-person-1', name: 'Dependente', taxId: '11144477735', birthDate: null },
-      ]),
-    });
-    const opportunityMembers = repository({
-      find: jest.fn().mockResolvedValue([
-        { id: 'member-1', personId: 'dependent-person-1', relationship: 'Filho' },
-      ]),
-    });
-    const participants = repository({
-      save: jest.fn().mockImplementation(async value => value),
-      create: jest.fn(value => value),
+      find: jest.fn().mockResolvedValue([]),
     });
     const sessions = repository({
       find: jest.fn().mockResolvedValue([]),
-      save: jest.fn().mockImplementation(async value => ({ id: 'session-1', ...value })),
+      save: jest.fn().mockImplementation(async value => ({ id: 'session-new', ...value })),
     });
-    const pricing = {
-      calculate: jest.fn().mockReturnValue({
-        schemaVersion: 1,
-        customerType: CustomerType.PERSON,
-        cycle: 'MONTHLY',
-        billingType: BillingType.CREDIT_CARD,
-        participants: { dependentCount: 1 },
-        pricing: { holderAmount: 100, dependentAmount: 25, baseAmount: 125, discountAmount: 0, finalAmount: 125 },
-        discounts: [],
-      }),
-    };
-    const { service } = createService({ opportunities, people, opportunityMembers, participants, sessions, pricing });
+    const pricing = { calculate: jest.fn() };
+    const { service } = createService({ opportunities, people, opportunityMembers, sessions, pricing });
     jest.spyOn(service as any, 'assertOpportunityAccess').mockResolvedValue(undefined);
     jest.spyOn(service as any, 'audit').mockResolvedValue(undefined);
     jest.spyOn(service as any, 'resolveTemplate').mockResolvedValue({
@@ -346,20 +350,26 @@ describe('CommercialWorkflowService', () => {
       version: 1,
     });
 
-    await service.createPrecheckout('unit-1', 'opportunity-1', 7, 'user-1', UnitRole.SALES, GlobalRole.STANDARD);
+    const result = await service.createPrecheckout(
+      'unit-1',
+      'opportunity-1',
+      7,
+      'user-1',
+      UnitRole.SALES,
+      GlobalRole.STANDARD,
+    );
 
-    expect(pricing.calculate).toHaveBeenCalledWith(expect.objectContaining({ dependentCount: 1 }));
-    expect(opportunity.expectedValue).toBe('125.00');
-    expect(participants.save).toHaveBeenCalledWith(expect.objectContaining({
-      precheckoutSessionId: 'session-1',
-      name: 'Dependente',
-      relationship: 'Filho',
-    }));
+    expect(result.url).toMatch(/^\/checkout\//);
+    expect(pricing.calculate).not.toHaveBeenCalled();
     expect(sessions.save).toHaveBeenCalledWith(expect.objectContaining({
-      customerData: expect.objectContaining({ name: 'Titular', email: 'titular@example.com' }),
-      pricingSnapshot: expect.objectContaining({ pricing: expect.objectContaining({ finalAmount: 125 }) }),
+      pricingSnapshot: expect.objectContaining({
+        participants: { dependentCount: 3 },
+        pricing: expect.objectContaining({ finalAmount: 175 }),
+      }),
     }));
+    expect(opportunity.expectedValue).toBe('175.00');
   });
+
 
   it('não consulta contratos de uma oportunidade de outra unidade', async () => {
     const opportunities = repository({
@@ -460,7 +470,35 @@ describe('CommercialWorkflowService', () => {
     expect(pricing.calculate).toHaveBeenCalled();
   });
 
-  it('usa somente meios aceitos pelo Checkout hospedado e envia customerData', async () => {
+  it('impede gerar o contrato enquanto o endereço obrigatório não foi persistido', async () => {
+    const session = {
+      id: 'precheckout-incomplete',
+      unitId: 'unit-1',
+      opportunityId: 'opportunity-1',
+      status: PrecheckoutStatus.DATA_COMPLETED,
+      customerData: {
+        name: 'Pessoa Teste',
+        taxId: '52998224725',
+        email: 'teste@example.com',
+        phone: '51999999999',
+      },
+    };
+    const opportunities = repository({
+      findOneByOrFail: jest.fn().mockResolvedValue({
+        id: 'opportunity-1',
+        unitId: 'unit-1',
+        customerType: CustomerType.PERSON,
+      }),
+    });
+    const { service } = createService({ opportunities });
+    jest.spyOn(service as any, 'byToken').mockResolvedValue(session);
+
+    await expect(service.prepareContract('token')).rejects.toThrow(
+      'Complete os dados cadastrais antes de continuar: CEP, Endereço, Número, Bairro, Cidade, UF.',
+    );
+  });
+
+  it('sincroniza o cliente e usa o valor congelado no contrato aceito no Checkout hospedado', async () => {
     const session = {
       id: 'precheckout-1',
       unitId: 'unit-1',
@@ -475,7 +513,19 @@ describe('CommercialWorkflowService', () => {
         pricing: { finalAmount: 150 },
       },
     };
-    const contract = { id: 'contract-1', unitId: 'unit-1', status: ContractStatus.ACCEPTED, requiresPayment: true };
+    const contract = {
+      id: 'contract-1',
+      unitId: 'unit-1',
+      status: ContractStatus.ACCEPTED,
+      requiresPayment: true,
+      snapshot: {
+        negotiation: {
+          cycle: 'MONTHLY',
+          allowedBillingTypes: [BillingType.CREDIT_CARD],
+          pricing: { finalAmount: 135 },
+        },
+      },
+    };
     const opportunity = {
       id: 'opportunity-1', unitId: 'unit-1', primaryPersonId: 'person-1',
       billingCycle: 'MONTHLY', billingType: BillingType.CREDIT_CARD,
@@ -484,7 +534,7 @@ describe('CommercialWorkflowService', () => {
     const person = {
       id: 'person-1', name: 'Pessoa Teste', taxId: '52998224725', email: 'teste@example.com',
       phone: '51999999999', postalCode: '90010000', address: 'Rua A', addressNumber: '10',
-      complement: null, district: 'Centro',
+      complement: null, district: 'Centro', city: 'Porto Alegre', state: 'RS',
     };
     const opportunities = repository({ findOneByOrFail: jest.fn().mockResolvedValue(opportunity) });
     const people = repository({ findOneByOrFail: jest.fn().mockResolvedValue(person) });
@@ -496,6 +546,7 @@ describe('CommercialWorkflowService', () => {
       save: jest.fn().mockImplementation(async (value) => ({ id: 'checkout-local-1', ...value })),
     });
     const asaas = {
+      updateCustomer: jest.fn().mockResolvedValue({ id: 'cus_1' }),
       createCheckout: jest.fn().mockResolvedValue({ id: 'checkout_asaas_1', link: 'https://asaas.example/checkout' }),
     };
     const { service } = createService({ opportunities, people, contracts, billingCustomers, checkoutSessions, asaas });
@@ -507,10 +558,18 @@ describe('CommercialWorkflowService', () => {
     expect(result.checkoutLink).toBe('https://asaas.example/checkout');
     expect(asaas.createCheckout).toHaveBeenCalledWith('unit-1', expect.objectContaining({
       billingTypes: [BillingType.CREDIT_CARD],
-      customerData: expect.objectContaining({ cpfCnpj: '52998224725' }),
+      customer: 'cus_1',
+      items: [expect.objectContaining({ value: 135 })],
       callback: expect.objectContaining({ expiredUrl: expect.any(String) }),
     }));
-    expect(asaas.createCheckout.mock.calls[0][1]).not.toHaveProperty('customer');
+    expect(asaas.updateCustomer).toHaveBeenCalledWith('unit-1', 'cus_1', expect.objectContaining({
+      cpfCnpj: '52998224725',
+      address: 'Rua A',
+      addressNumber: '10',
+      postalCode: '90010000',
+      province: 'Centro',
+    }));
+    expect(asaas.createCheckout.mock.calls[0][1]).not.toHaveProperty('customerData');
   });
 
   it('gera boleto recorrente pela assinatura, sem enviar BOLETO ao Checkout hospedado', async () => {
@@ -530,6 +589,8 @@ describe('CommercialWorkflowService', () => {
     const people = repository({
       findOneByOrFail: jest.fn().mockResolvedValue({
         id: 'person-2', name: 'Pessoa Boleto', taxId: '52998224725', email: 'boleto@example.com',
+        phone: '51999999999', postalCode: '90010000', address: 'Rua B', addressNumber: '20',
+        complement: null, district: 'Centro', city: 'Porto Alegre', state: 'RS',
       }),
     });
     const opportunities = repository({ findOneByOrFail: jest.fn().mockResolvedValue(opportunity) });
@@ -541,6 +602,7 @@ describe('CommercialWorkflowService', () => {
       save: jest.fn().mockImplementation(async (value) => ({ id: value.id || 'checkout-local-2', ...value })),
     });
     const asaas = {
+      updateCustomer: jest.fn().mockResolvedValue({ id: 'cus_2' }),
       createCheckout: jest.fn(),
       createSubscription: jest.fn().mockResolvedValue({ id: 'sub_asaas_1' }),
       subscriptionPayments: jest.fn().mockResolvedValue({
@@ -557,6 +619,86 @@ describe('CommercialWorkflowService', () => {
     expect(asaas.createSubscription).toHaveBeenCalledWith('unit-1', expect.objectContaining({
       billingType: BillingType.BOLETO,
       externalReference: 'opportunity-2',
+    }));
+    expect(asaas.createCheckout).not.toHaveBeenCalled();
+  });
+
+
+  it('gera Pix pela assinatura do Asaas em vez de Checkout recorrente hospedado', async () => {
+    const session = {
+      id: 'precheckout-pix',
+      unitId: 'unit-1',
+      opportunityId: 'opportunity-pix',
+      contractId: 'contract-pix',
+      checkoutSessionId: null,
+      status: PrecheckoutStatus.ACCEPTED,
+      customerData: {},
+      pricingSnapshot: {
+        cycle: 'YEARLY',
+        allowedBillingTypes: [BillingType.CREDIT_CARD, BillingType.PIX],
+        pricing: { finalAmount: 1200 },
+      },
+    };
+    const contract = {
+      id: 'contract-pix',
+      unitId: 'unit-1',
+      status: ContractStatus.ACCEPTED,
+      requiresPayment: true,
+      snapshot: {
+        negotiation: {
+          cycle: 'YEARLY',
+          allowedBillingTypes: [BillingType.CREDIT_CARD, BillingType.PIX],
+          pricing: { finalAmount: 1200 },
+        },
+      },
+    };
+    const opportunity = {
+      id: 'opportunity-pix',
+      unitId: 'unit-1',
+      primaryPersonId: 'person-pix',
+      customerType: CustomerType.PERSON,
+      billingCycle: 'YEARLY',
+      billingType: BillingType.PIX,
+      negotiationSnapshot: {},
+      status: 'OPEN',
+      commercialStatus: CommercialStatus.APPROVED,
+    };
+    const people = repository({
+      findOneByOrFail: jest.fn().mockResolvedValue({
+        id: 'person-pix', name: 'Pessoa Pix', taxId: '52998224725', email: 'pix@example.com',
+        phone: '51999999999', postalCode: '90010000', address: 'Rua Pix', addressNumber: '30',
+        complement: null, district: 'Centro', city: 'Porto Alegre', state: 'RS',
+      }),
+    });
+    const opportunities = repository({ findOneByOrFail: jest.fn().mockResolvedValue(opportunity) });
+    const contracts = repository({ findOneByOrFail: jest.fn().mockResolvedValue(contract) });
+    const billingCustomers = repository({
+      findOne: jest.fn().mockResolvedValue({ id: 'billing-customer-pix', externalId: 'cus_pix' }),
+    });
+    const checkoutSessions = repository({
+      save: jest.fn().mockImplementation(async (value) => ({ id: value.id || 'checkout-local-pix', ...value })),
+    });
+    const asaas = {
+      updateCustomer: jest.fn().mockResolvedValue({ id: 'cus_pix' }),
+      createCheckout: jest.fn(),
+      createSubscription: jest.fn().mockResolvedValue({ id: 'sub_pix' }),
+      subscriptionPayments: jest.fn().mockResolvedValue({
+        data: [{ id: 'pay_pix', invoiceUrl: 'https://asaas.example/invoice/pix' }],
+      }),
+    };
+    const { service } = createService({ opportunities, people, contracts, billingCustomers, checkoutSessions, asaas });
+    jest.spyOn(service as any, 'byToken').mockResolvedValue(session);
+    jest.spyOn(service as any, 'audit').mockResolvedValue(undefined);
+
+    const result = await service.startAsaasCheckout('token', { billingType: BillingType.PIX });
+
+    expect(result.checkoutLink).toBe('https://asaas.example/invoice/pix');
+    expect(asaas.createSubscription).toHaveBeenCalledWith('unit-1', expect.objectContaining({
+      customer: 'cus_pix',
+      billingType: BillingType.PIX,
+      value: 1200,
+      cycle: 'YEARLY',
+      externalReference: 'opportunity-pix',
     }));
     expect(asaas.createCheckout).not.toHaveBeenCalled();
   });

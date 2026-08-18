@@ -542,70 +542,25 @@ export class CommercialWorkflowService {
       id: opportunity.primaryPersonId,
       unitId,
     });
+    const pricingSnapshot = opportunity.negotiationSnapshot || {};
+    const negotiatedDependentCount = opportunity.customerType === CustomerType.PERSON
+      ? Math.max(0, Number(pricingSnapshot?.participants?.dependentCount ?? 0) || 0)
+      : 0;
+
+    // A negociação é a fonte de verdade para quantidade e preço.
+    // Dependentes já vinculados à oportunidade servem apenas como pré-preenchimento de cadastro.
     const opportunityDependents = opportunity.customerType === CustomerType.PERSON
       ? await this.opportunityMembers.find({
           where: { unitId, opportunityId, role: MemberRole.DEPENDENT },
           order: { createdAt: 'ASC' },
         })
       : [];
-    const dependentPeople = opportunityDependents.length
+    const prefilledOpportunityDependents = opportunityDependents.slice(0, negotiatedDependentCount);
+    const dependentPeople = prefilledOpportunityDependents.length
       ? await this.people.find({
-          where: { unitId, id: In(opportunityDependents.map((member) => member.personId)) },
+          where: { unitId, id: In(prefilledOpportunityDependents.map((member) => member.personId)) },
         })
       : [];
-
-    let pricingSnapshot = opportunity.negotiationSnapshot || {};
-    const configuredMaxDependents = Number(pricingSnapshot?.limits?.maxDependents);
-    if (opportunity.customerType === CustomerType.PERSON
-      && Number.isFinite(configuredMaxDependents)
-      && configuredMaxDependents >= 0
-      && opportunityDependents.length > configuredMaxDependents) {
-      throw new BadRequestException(
-        `A negociação permite no máximo ${configuredMaxDependents} dependentes.`,
-      );
-    }
-    const participantEditingAllowed = pricingSnapshot?.source === 'PUBLIC_OFFER';
-    if (opportunity.customerType === CustomerType.PERSON
-      && pricingSnapshot?.pricing
-      && !participantEditingAllowed) {
-      const cycle = pricingSnapshot.cycle || opportunity.billingCycle;
-      if (cycle) {
-        const calculation = this.pricing.calculate({
-          customerType: CustomerType.PERSON,
-          cycle,
-          billingType: pricingSnapshot.billingType || opportunity.billingType || undefined,
-          baseAmount: Number(
-            pricingSnapshot.pricing.holderAmount
-            ?? pricingSnapshot.pricing.baseAmount
-            ?? 0,
-          ),
-          dependentAmount: Number(pricingSnapshot.pricing.dependentAmount ?? 0),
-          dependentCount: opportunityDependents.length,
-          annualDiscountPercent: Number(
-            pricingSnapshot.pricing.annualDiscountPercent
-            ?? pricingSnapshot.annualDiscountPercent
-            ?? 0,
-          ),
-          discounts: pricingSnapshot.discounts || [],
-        });
-        pricingSnapshot = {
-          ...calculation,
-          allowedBillingTypes: pricingSnapshot.allowedBillingTypes,
-          limits: pricingSnapshot.limits,
-          offer: pricingSnapshot.offer,
-          priceTable: pricingSnapshot.priceTable,
-          contractTemplateVersionId: opportunity.contractTemplateVersionId
-            || pricingSnapshot.contractTemplateVersionId
-            || null,
-          source: pricingSnapshot.source,
-        };
-        opportunity.negotiationSnapshot = pricingSnapshot;
-        opportunity.expectedValue = Number(calculation.pricing.finalAmount).toFixed(2);
-        opportunity.billingCycle = calculation.cycle;
-        opportunity.billingType = calculation.billingType || opportunity.billingType;
-        await this.opportunities.save(opportunity);
-      }
-    }
 
     // A política é avaliada sobre os valores finais e a quantidade real de participantes.
     if (userId) {
@@ -651,7 +606,7 @@ export class CommercialWorkflowService {
       pricingSnapshot,
     }));
 
-    for (const member of opportunityDependents) {
+    for (const member of prefilledOpportunityDependents) {
       const person = dependentPeople.find((item) => item.id === member.personId);
       if (!person) continue;
       await this.participants.save(this.participants.create({
@@ -668,7 +623,7 @@ export class CommercialWorkflowService {
     await this.audit(unitId, userId || null, 'precheckout.created', 'precheckout_session', session.id, null, {
       opportunityId,
       expiresAt: session.expiresAt,
-      prefilledDependents: opportunityDependents.length,
+      prefilledDependents: prefilledOpportunityDependents.length,
       finalAmount: pricingSnapshot?.pricing?.finalAmount ?? opportunity.expectedValue,
       contractTemplateVersionId: opportunity.contractTemplateVersionId,
     });
@@ -756,12 +711,14 @@ export class CommercialWorkflowService {
       version: templateVersion.version,
     } : null;
 
+    const effectivePricing = contract?.snapshot?.negotiation || session.pricingSnapshot;
+
     return {
       status: session.status,
       expiresAt: session.expiresAt,
       customerType: opportunity.customerType,
       participantEditingAllowed: opportunity.customerType === CustomerType.PERSON
-        && session.pricingSnapshot?.source === 'PUBLIC_OFFER',
+        && !contract,
       customer: {
         name: person.name,
         taxId: person.taxId,
@@ -769,9 +726,9 @@ export class CommercialWorkflowService {
         phone: person.phone,
         ...session.customerData,
       },
-      pricing: session.pricingSnapshot,
+      pricing: effectivePricing,
       contractTemplate,
-      allowedBillingTypes: session.pricingSnapshot?.allowedBillingTypes
+      allowedBillingTypes: effectivePricing?.allowedBillingTypes
         || opportunity.negotiationSnapshot?.allowedBillingTypes
         || (opportunity.billingType ? [opportunity.billingType] : [BillingType.CREDIT_CARD]),
       participants,
@@ -869,34 +826,63 @@ export class CommercialWorkflowService {
 
   async addParticipant(token: string, dto: PrecheckoutParticipantDto) {
     const session = await this.byToken(token);
-    if (session.pricingSnapshot?.source !== 'PUBLIC_OFFER') {
-      throw new BadRequestException(
-        'A quantidade de dependentes foi definida na negociação e não pode ser alterada no pré-checkout.',
-      );
-    }
     await this.ensureEditable(session);
     const opportunity = await this.opportunities.findOneByOrFail({ id: session.opportunityId, unitId: session.unitId });
     if (opportunity.customerType !== CustomerType.PERSON) throw new BadRequestException('Beneficiários empresariais serão cadastrados após a contratação.');
-    const count = await this.participants.count({ where: { precheckoutSessionId: session.id, unitId: session.unitId } });
-    const max = Number(session.pricingSnapshot?.limits?.maxDependents ?? 20);
-    if (count >= max) throw new BadRequestException('Limite de dependentes atingido.');
+
+    const count = await this.participants.count({
+      where: { precheckoutSessionId: session.id, unitId: session.unitId },
+    });
+    const publicOffer = session.pricingSnapshot?.source === 'PUBLIC_OFFER';
+    const negotiatedCount = Math.max(
+      0,
+      Number(session.pricingSnapshot?.participants?.dependentCount ?? 0) || 0,
+    );
+    const max = publicOffer
+      ? Number(session.pricingSnapshot?.limits?.maxDependents ?? 20)
+      : negotiatedCount;
+
+    if (count >= max) {
+      throw new BadRequestException(
+        publicOffer
+          ? 'Limite de dependentes atingido.'
+          : `A negociação prevê ${negotiatedCount} dependente(s), e todos já foram informados.`,
+      );
+    }
+
     const taxId = dto.taxId.replace(/\D/g,'');
     if (!isValidCpf(taxId)) throw new BadRequestException('CPF do dependente inválido.');
-    await this.participants.save(this.participants.create({ unitId: session.unitId, precheckoutSessionId: session.id, role: MemberRole.DEPENDENT, name: dto.name, taxId, birthDate: dto.birthDate || null, relationship: dto.relationship || null }));
-    await this.reprice(session);
+    await this.participants.save(this.participants.create({
+      unitId: session.unitId,
+      precheckoutSessionId: session.id,
+      role: MemberRole.DEPENDENT,
+      name: dto.name,
+      taxId,
+      birthDate: dto.birthDate || null,
+      relationship: dto.relationship || null,
+    }));
+
+    if (publicOffer) await this.reprice(session);
     return this.publicGet(token);
   }
 
   async removeParticipant(token: string, participantId: string) {
     const session = await this.byToken(token);
-    if (session.pricingSnapshot?.source !== 'PUBLIC_OFFER') {
-      throw new BadRequestException(
-        'A quantidade de dependentes foi definida na negociação e não pode ser alterada no pré-checkout.',
-      );
-    }
     await this.ensureEditable(session);
-    await this.participants.delete({ id: participantId, precheckoutSessionId: session.id, unitId: session.unitId });
-    await this.reprice(session);
+    const opportunity = await this.opportunities.findOneByOrFail({
+      id: session.opportunityId,
+      unitId: session.unitId,
+    });
+    if (opportunity.customerType !== CustomerType.PERSON) {
+      throw new BadRequestException('Beneficiários empresariais serão cadastrados após a contratação.');
+    }
+
+    await this.participants.delete({
+      id: participantId,
+      precheckoutSessionId: session.id,
+      unitId: session.unitId,
+    });
+    if (session.pricingSnapshot?.source === 'PUBLIC_OFFER') await this.reprice(session);
     return this.publicGet(token);
   }
 
@@ -942,19 +928,32 @@ export class CommercialWorkflowService {
     if ([PrecheckoutStatus.ACCEPTED, PrecheckoutStatus.PAYMENT_PENDING, PrecheckoutStatus.COMPLETED].includes(session.status)) {
       throw new ConflictException('O contrato já foi aceito e não pode ser regenerado.');
     }
-    if (!session.customerData?.name || !session.customerData?.taxId) {
-      throw new BadRequestException('Confirme os dados cadastrais.');
-    }
     const opportunity = await this.opportunities.findOneByOrFail({ id: session.opportunityId, unitId: session.unitId });
+    this.validateCustomerDataForCheckout(session.customerData, opportunity.customerType);
     if (opportunity.customerType === CustomerType.COMPANY) {
-      if (!session.customerData?.legalRepresentative?.name || !session.customerData?.financialContact?.email) {
-        throw new BadRequestException('Informe os responsáveis legal e financeiro.');
+      const legalRepresentative = session.customerData?.legalRepresentative;
+      const financialContact = session.customerData?.financialContact;
+      if (!legalRepresentative?.name || !legalRepresentative?.taxId
+        || !financialContact?.name || !financialContact?.email || !financialContact?.phone) {
+        throw new BadRequestException('Informe e confirme os responsáveis legal e financeiro.');
       }
     }
     const participants = await this.participants.find({
       where: { precheckoutSessionId: session.id, unitId: session.unitId },
       order: { createdAt: 'ASC' },
     });
+    if (opportunity.customerType === CustomerType.PERSON
+      && session.pricingSnapshot?.source !== 'PUBLIC_OFFER') {
+      const negotiatedDependentCount = Math.max(
+        0,
+        Number(session.pricingSnapshot?.participants?.dependentCount ?? 0) || 0,
+      );
+      if (participants.length !== negotiatedDependentCount) {
+        throw new BadRequestException(
+          `Informe os dados dos ${negotiatedDependentCount} dependente(s) previstos na negociação antes de gerar o contrato.`,
+        );
+      }
+    }
     const snapshot: Record<string, any> = {
       customer: session.customerData,
       participants,
@@ -1101,7 +1100,7 @@ export class CommercialWorkflowService {
             return { checkoutId: existing.id, checkoutLink: existing.url, expiresAt: existing.expiresAt };
           }
           throw new BadRequestException(
-            'O primeiro boleto ainda está sendo preparado pelo Asaas. Tente novamente em instantes.',
+            'A primeira cobrança ainda está sendo preparada pelo Asaas. Tente novamente em instantes.',
           );
         }
       }
@@ -1109,45 +1108,36 @@ export class CommercialWorkflowService {
 
     const opportunity = await this.opportunities.findOneByOrFail({ id: session.opportunityId, unitId: session.unitId });
     const person = await this.people.findOneByOrFail({ id: opportunity.primaryPersonId, unitId: session.unitId });
-    const configured = session.pricingSnapshot?.allowedBillingTypes
-      || opportunity.negotiationSnapshot?.allowedBillingTypes
+    const acceptedNegotiation = contract.snapshot?.negotiation
+      || session.pricingSnapshot
+      || opportunity.negotiationSnapshot
+      || {};
+    const configured = acceptedNegotiation?.allowedBillingTypes
       || (opportunity.billingType ? [opportunity.billingType] : [BillingType.CREDIT_CARD]);
     const allowed = configured.map((value: string) => String(value).toUpperCase());
     if (!allowed.includes(dto.billingType)) throw new BadRequestException('Forma de pagamento não autorizada para esta contratação.');
 
     const customerData = { ...person, ...session.customerData };
-    let billingCustomer = await this.billingCustomers.findOne({ where: { unitId: session.unitId, personId: person.id, provider: BillingProviderName.ASAAS } });
-    if (!billingCustomer) {
-      const external = await this.asaas.createCustomer(session.unitId, {
-        name: customerData.name,
-        cpfCnpj: String(customerData.taxId || '').replace(/\D/g, ''),
-        email: customerData.email,
-        phone: customerData.phone,
-        postalCode: String(customerData.postalCode || '').replace(/\D/g, ''),
-        address: customerData.address,
-        addressNumber: customerData.addressNumber,
-        complement: customerData.complement || undefined,
-        province: customerData.district,
-        externalReference: person.id,
-      });
-      billingCustomer = await this.billingCustomers.save(this.billingCustomers.create({
-        unitId: session.unitId, personId: person.id, provider: BillingProviderName.ASAAS,
-        externalId: external.id, metadata: { source: 'commercial_precheckout' },
-      }));
-    }
+    this.validateCustomerDataForCheckout(customerData, opportunity.customerType);
+    const billingCustomer = await this.syncAsaasCustomer(session.unitId, person, customerData);
 
-    const value = Number(session.pricingSnapshot?.pricing?.finalAmount
-      ?? opportunity.negotiationSnapshot?.pricing?.finalAmount
-      ?? opportunity.expectedValue ?? 0);
+    const value = Number(acceptedNegotiation?.pricing?.finalAmount ?? opportunity.expectedValue ?? 0);
     if (!(value > 0)) throw new BadRequestException('Valor final inválido.');
 
     const appUrl = (process.env.APP_URL || 'http://localhost:4002').replace(/\/$/, '');
-    const cycle = session.pricingSnapshot?.cycle || opportunity.billingCycle || 'MONTHLY';
+    const cycle = acceptedNegotiation?.cycle || opportunity.billingCycle || 'MONTHLY';
     const nextDueDate = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
 
-    if (dto.billingType === BillingType.BOLETO) {
-      return this.startBoletoSubscription({
-        session, contract, opportunity, billingCustomer, value, cycle, nextDueDate,
+    if (dto.billingType === BillingType.BOLETO || dto.billingType === BillingType.PIX) {
+      return this.startDirectSubscription({
+        session,
+        contract,
+        opportunity,
+        billingCustomer,
+        billingType: dto.billingType,
+        value,
+        cycle,
+        nextDueDate,
       });
     }
 
@@ -1156,17 +1146,7 @@ export class CommercialWorkflowService {
       chargeTypes: ['RECURRENT'],
       minutesToExpire: 1440,
       externalReference: opportunity.id,
-      customerData: {
-        name: customerData.name,
-        cpfCnpj: String(customerData.taxId || '').replace(/\D/g, ''),
-        email: customerData.email || undefined,
-        phone: customerData.phone || undefined,
-        postalCode: String(customerData.postalCode || '').replace(/\D/g, '') || undefined,
-        address: customerData.address || undefined,
-        addressNumber: customerData.addressNumber || undefined,
-        complement: customerData.complement || undefined,
-        province: customerData.district || undefined,
-      },
+      customer: billingCustomer.externalId,
       items: [{ name: process.env.APP_NAME || 'Clube de Assinatura', quantity: 1, value }],
       subscription: { cycle, nextDueDate },
       callback: {
@@ -1190,6 +1170,8 @@ export class CommercialWorkflowService {
         precheckoutSessionId: session.id,
         billingType: dto.billingType,
         providerResourceType: 'CHECKOUT',
+        contractedAmount: value,
+        billingCycle: cycle,
       },
     }));
     session.checkoutSessionId = checkout.id;
@@ -1209,19 +1191,99 @@ export class CommercialWorkflowService {
   }
 
 
-  private async startBoletoSubscription(input: {
+  private validateCustomerDataForCheckout(customerData: Record<string, any>, customerType: CustomerType) {
+    const requiredFields: Array<[string, string]> = [
+      ['name', customerType === CustomerType.COMPANY ? 'Razão social/nome' : 'Nome'],
+      ['taxId', customerType === CustomerType.COMPANY ? 'CNPJ' : 'CPF'],
+      ['email', 'E-mail'],
+      ['phone', 'Telefone'],
+      ['postalCode', 'CEP'],
+      ['address', 'Endereço'],
+      ['addressNumber', 'Número'],
+      ['district', 'Bairro'],
+      ['city', 'Cidade'],
+      ['state', 'UF'],
+    ];
+    const missing = requiredFields
+      .filter(([key]) => !String(customerData?.[key] ?? '').trim())
+      .map(([, label]) => label);
+    if (missing.length) {
+      throw new BadRequestException(
+        `Complete os dados cadastrais antes de continuar: ${missing.join(', ')}.`,
+      );
+    }
+
+    const postalCode = String(customerData.postalCode).replace(/\D/g, '');
+    if (postalCode.length !== 8) throw new BadRequestException('Informe um CEP válido com 8 dígitos.');
+    const state = String(customerData.state).trim().toUpperCase();
+    if (state.length !== 2) throw new BadRequestException('Informe a UF com 2 letras.');
+  }
+
+  private async syncAsaasCustomer(unitId: string, person: Person, customerData: Record<string, any>) {
+    const payload = {
+      name: String(customerData.name).trim(),
+      cpfCnpj: String(customerData.taxId).replace(/\D/g, ''),
+      email: String(customerData.email).trim().toLowerCase(),
+      phone: String(customerData.phone).replace(/\D/g, ''),
+      mobilePhone: String(customerData.phone).replace(/\D/g, ''),
+      postalCode: String(customerData.postalCode).replace(/\D/g, ''),
+      address: String(customerData.address).trim(),
+      addressNumber: String(customerData.addressNumber).trim(),
+      complement: String(customerData.complement || '').trim() || undefined,
+      province: String(customerData.district).trim(),
+      externalReference: person.id,
+    };
+
+    let billingCustomer = await this.billingCustomers.findOne({
+      where: { unitId, personId: person.id, provider: BillingProviderName.ASAAS },
+    });
+    if (billingCustomer) {
+      await this.asaas.updateCustomer(unitId, billingCustomer.externalId, payload);
+      billingCustomer.metadata = {
+        ...(billingCustomer.metadata || {}),
+        source: 'commercial_precheckout',
+        lastSyncedAt: new Date().toISOString(),
+      };
+      return this.billingCustomers.save(billingCustomer);
+    }
+
+    const external = await this.asaas.createCustomer(unitId, payload);
+    billingCustomer = await this.billingCustomers.save(this.billingCustomers.create({
+      unitId,
+      personId: person.id,
+      provider: BillingProviderName.ASAAS,
+      externalId: external.id,
+      metadata: {
+        source: 'commercial_precheckout',
+        lastSyncedAt: new Date().toISOString(),
+      },
+    }));
+    return billingCustomer;
+  }
+
+  private async startDirectSubscription(input: {
     session: PrecheckoutSession;
     contract: Contract;
     opportunity: Opportunity;
     billingCustomer: BillingCustomer;
+    billingType: BillingType.BOLETO | BillingType.PIX;
     value: number;
     cycle: string;
     nextDueDate: string;
   }) {
-    const { session, contract, opportunity, billingCustomer, value, cycle, nextDueDate } = input;
+    const {
+      session,
+      contract,
+      opportunity,
+      billingCustomer,
+      billingType,
+      value,
+      cycle,
+      nextDueDate,
+    } = input;
     const subscription = await this.asaas.createSubscription(session.unitId, {
       customer: billingCustomer.externalId,
-      billingType: BillingType.BOLETO,
+      billingType,
       value,
       nextDueDate,
       cycle,
@@ -1241,8 +1303,10 @@ export class CommercialWorkflowService {
       payload: {
         contractId: contract.id,
         precheckoutSessionId: session.id,
-        billingType: BillingType.BOLETO,
+        billingType,
         providerResourceType: 'SUBSCRIPTION',
+        contractedAmount: value,
+        billingCycle: cycle,
       },
     }));
 
@@ -1260,7 +1324,7 @@ export class CommercialWorkflowService {
       checkout.payload = { ...checkout.payload, paymentId: payment?.id || null };
       await this.checkoutSessions.save(checkout);
     } catch (error) {
-      await this.audit(session.unitId, null, 'asaas.boleto_link_pending', 'checkout_session', checkout.id, null, {
+      await this.audit(session.unitId, null, 'asaas.subscription_payment_link_pending', 'checkout_session', checkout.id, null, {
         opportunityId: opportunity.id,
         externalSubscriptionId: subscription.id,
       });
@@ -1269,7 +1333,7 @@ export class CommercialWorkflowService {
 
     if (!checkout.url) {
       throw new BadRequestException(
-        'A assinatura foi criada no Asaas, mas o link do primeiro boleto ainda não está disponível. Tente novamente em instantes.',
+        'A assinatura foi criada no Asaas, mas o link da primeira cobrança ainda não está disponível. Tente novamente em instantes.',
       );
     }
 
@@ -1277,7 +1341,7 @@ export class CommercialWorkflowService {
       opportunityId: opportunity.id,
       contractId: contract.id,
       externalSubscriptionId: subscription.id,
-      billingType: BillingType.BOLETO,
+      billingType,
       amount: value,
     });
     return { checkoutId: checkout.id, checkoutLink: checkout.url, expiresAt: checkout.expiresAt };

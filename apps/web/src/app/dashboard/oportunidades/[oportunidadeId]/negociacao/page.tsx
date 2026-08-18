@@ -433,40 +433,51 @@ export default function NegotiationWorkspacePage() {
     if (priceTable) applyPriceTableDefaults(priceTable);
   }
 
+  function negotiationPayload() {
+    if (!opportunity) return null;
+    const discounts = Number(form.discountPercent) > 0
+      ? [{ type: 'PERCENTAGE', value: Number(form.discountPercent), reason: 'Negociação comercial' }]
+      : [];
+    return {
+      customerType: opportunity.customerType,
+      priceTableVersionId: priceTable?.id || undefined,
+      contractTemplateVersionId: form.contractTemplateVersionId || undefined,
+      cycle: opportunity.customerType === 'COMPANY' ? 'MONTHLY' : form.cycle,
+      billingType: form.billingType,
+      allowedBillingTypes: form.allowedBillingTypes,
+      negotiation: opportunity.customerType === 'COMPANY'
+        ? {
+            baseAmount: Number(form.unitPrice),
+            unitPrice: Number(form.unitPrice),
+            lives: Number(form.lives),
+            discounts,
+          }
+        : {
+            baseAmount: Number(form.holderAmount),
+            dependentAmount: Number(form.dependentAmount),
+            dependentCount: Number(form.dependentCount),
+            annualDiscountPercent: Number(form.annualDiscountPercent || 0),
+            discounts,
+          },
+    };
+  }
+
+  async function persistNegotiation() {
+    const payload = negotiationPayload();
+    if (!payload) throw new Error('Oportunidade não carregada.');
+    return api(`/oportunidades/${oportunidadeId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    });
+  }
+
   async function save(event: FormEvent) {
     event.preventDefault();
     if (!opportunity) return;
     setBusy(true);
     setError('');
     try {
-      const discounts = Number(form.discountPercent) > 0
-        ? [{ type: 'PERCENTAGE', value: Number(form.discountPercent), reason: 'Negociação comercial' }]
-        : [];
-      await api(`/oportunidades/${oportunidadeId}`, {
-        method: 'PATCH',
-        body: JSON.stringify({
-          customerType: opportunity.customerType,
-          priceTableVersionId: priceTable?.id || undefined,
-          contractTemplateVersionId: form.contractTemplateVersionId || undefined,
-          cycle: opportunity.customerType === 'COMPANY' ? 'MONTHLY' : form.cycle,
-          billingType: form.billingType,
-          allowedBillingTypes: form.allowedBillingTypes,
-          negotiation: opportunity.customerType === 'COMPANY'
-            ? {
-                baseAmount: Number(form.unitPrice),
-                unitPrice: Number(form.unitPrice),
-                lives: Number(form.lives),
-                discounts,
-              }
-            : {
-                baseAmount: Number(form.holderAmount),
-                dependentAmount: Number(form.dependentAmount),
-                dependentCount: Number(form.dependentCount),
-                annualDiscountPercent: Number(form.annualDiscountPercent || 0),
-                discounts,
-              },
-        }),
-      });
+      await persistNegotiation();
       await load();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Falha ao salvar negociação.');
@@ -536,15 +547,18 @@ export default function NegotiationWorkspacePage() {
     setBusy(true);
     setError('');
     try {
+      // O link sempre deve congelar exatamente as condições que estão visíveis na negociação.
+      await persistNegotiation();
       const result = await api(`/commercial/opportunities/${oportunidadeId}/precheckout`, {
         method: 'POST',
       });
       const absolute = `${window.location.origin}${result.url}`;
       setCheckoutUrl(absolute);
-      await navigator.clipboard.writeText(absolute);
+      await navigator.clipboard?.writeText(absolute).catch(() => undefined);
       await load();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Falha ao gerar pré-checkout.');
+      await load().catch(() => undefined);
     } finally {
       setBusy(false);
     }
@@ -591,6 +605,8 @@ export default function NegotiationWorkspacePage() {
               </span>
             </div>
           </section>
+
+          <OpportunityWorkspaceNav opportunityId={oportunidadeId} />
 
           <section className="rounded-xl border border-edge bg-surface-elevated p-6">
             <h2 className="text-lg font-semibold">Responsabilidade comercial</h2>
@@ -823,7 +839,7 @@ export default function NegotiationWorkspacePage() {
                       className="mt-1 w-full rounded-lg border px-3 py-2"
                     />
                     <small className="mt-1 block text-xs text-ink-tertiary">
-                      Ao gerar o pré-checkout, o sistema sincroniza esta quantidade com os dependentes efetivamente cadastrados.
+                      A quantidade deve corresponder aos dependentes cadastrados na oportunidade; o pré-checkout não altera silenciosamente o valor negociado.
                       {priceTable ? ` Limite da tabela: ${priceTable.maxDependents}.` : ''}
                     </small>
                   </label>
