@@ -16,7 +16,9 @@
     "seed": "ts-node -r tsconfig-paths/register database/seeds/seed.ts",
     "seed:test-users": "ts-node -r tsconfig-paths/register database/seeds/seed-test-users.ts",
     "seed:commercial-feature": "ts-node -r tsconfig-paths/register database/seeds/seed-commercial-feature.ts",
-    "seed:test-all": "npm run seed:test-users && npm run seed:commercial-feature"
+    "seed:test-all": "npm run seed:test-users && npm run seed:commercial-feature",
+    "backfill:subscriber-contracts": "ts-node -r tsconfig-paths/register database/scripts/backfill-subscription-contract-metadata.ts",
+    "test:subscriber-post-sale": "jest --runInBand src/modules/subscriptions/subscriptions.service.spec.ts src/modules/subscriptions/subscription-state-machine.spec.ts src/modules/commercial/commercial-workflow.service.spec.ts src/modules/webhooks/webhooks.service.spec.ts"
   },
   "dependencies": {
     "@nestjs/axios": "^4.0.1",

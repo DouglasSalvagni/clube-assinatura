@@ -208,7 +208,15 @@ export class CreateContractRevisionDto {
   @IsOptional() @IsInt() @Min(1) @Max(30) expiresInDays?: number;
 }
 
+export class SaveContractRevisionDraftDto {
+  @IsOptional() @IsIn([ContractRelationType.AMENDMENT, ContractRelationType.RENEWAL, ContractRelationType.REPLACEMENT])
+  relationType?: ContractRelationType;
+  @IsOptional() @IsString() reason?: string;
+  @ValidateNested() @Type(() => ContractRevisionTermsDto) changes: ContractRevisionTermsDto;
+  @IsOptional() @IsBoolean() requiresPayment?: boolean;
+  @EmptyToUndefined() @IsOptional() @IsUUID() contractTemplateVersionId?: string;
+}
+
 export class UpdateCommercialFeatureDto {
   @IsBoolean() enabled: boolean;
 }
-

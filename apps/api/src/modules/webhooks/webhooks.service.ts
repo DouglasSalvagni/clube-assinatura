@@ -156,19 +156,45 @@ export class WebhooksService {
     const precheckout = await this.precheckoutRepo.findOne({
       where: { unitId: event.unitId, checkoutSessionId: checkout.id },
     });
+    const localSubscription = await this.subRepo.findOne({
+      where: { unitId: event.unitId, sourceOpportunityId: checkout.opportunityId },
+    });
+    const commercialHostedCheckout = Boolean(
+      precheckout && checkout.payload?.providerResourceType === 'CHECKOUT',
+    );
     if (precheckout) {
-      precheckout.status = this.precheckoutStatus(mappedStatus);
+      const terminalFailure = [CheckoutStatus.EXPIRED, CheckoutStatus.CANCELLED, CheckoutStatus.FAILED].includes(mappedStatus);
+      if (mappedStatus === CheckoutStatus.PAID && commercialHostedCheckout) {
+        // CHECKOUT_PAID confirma a conclusão da jornada hospedada, mas a primeira cobrança
+        // recorrente ainda pode estar PENDING (ex.: vencimento no dia seguinte). A ativação
+        // financeira ocorre somente em PAYMENT_CONFIRMED/PAYMENT_RECEIVED.
+        // CHECKOUT_PAID não é confirmação da primeira cobrança recorrente. A
+        // assinatura ativa eventualmente encontrada aqui pode ser a anterior
+        // a um aditivo e não pode concluir este novo pré-checkout.
+        precheckout.status = PrecheckoutStatus.PAYMENT_PENDING;
+      } else {
+        precheckout.status = terminalFailure && localSubscription
+          ? PrecheckoutStatus.ACCEPTED
+          : this.precheckoutStatus(mappedStatus);
+      }
+      if (terminalFailure && localSubscription) precheckout.checkoutSessionId = null;
       await this.precheckoutRepo.save(precheckout);
     }
 
     if (mappedStatus === CheckoutStatus.PAID) {
-      await this.opportunities.convertByCheckout(event.unitId, externalId, event.payload);
+      // O fluxo comercial v2 já cria o assinante PENDING_PAYMENT antes do redirecionamento.
+      // Não converter/ativar aqui: no checkout recorrente do Asaas, CHECKOUT_PAID não implica
+      // necessariamente que a primeira cobrança tenha sido confirmada.
+      if (!commercialHostedCheckout) {
+        await this.opportunities.convertByCheckout(event.unitId, externalId, event.payload);
+      }
     } else {
       const opportunity = await this.opportunityRepo.findOne({
         where: { unitId: event.unitId, id: checkout.opportunityId },
       });
       if (opportunity) {
-        if ([CheckoutStatus.EXPIRED, CheckoutStatus.CANCELLED, CheckoutStatus.FAILED].includes(mappedStatus)) {
+        if ([CheckoutStatus.EXPIRED, CheckoutStatus.CANCELLED, CheckoutStatus.FAILED].includes(mappedStatus)
+          && !localSubscription) {
           opportunity.status = OpportunityStatus.OPEN;
           opportunity.commercialStatus = opportunity.customerType === CustomerType.COMPANY
             ? CommercialStatus.APPROVED
@@ -221,28 +247,107 @@ export class WebhooksService {
   private async payment(event: WebhookEvent): Promise<boolean> {
     const p = event.payload?.payment;
     if (!p?.id) return false;
-    const sub = await this.resolveSubscription(event.unitId, p);
+    let sub = await this.resolveSubscription(event.unitId, p);
     let invoice = await this.invoiceRepo.findOne({ where: { unitId: event.unitId, externalId: p.id } });
-    const status = this.invoiceStatus(event.eventType, p.status);
-    if (!invoice) invoice = this.invoiceRepo.create({ unitId: event.unitId, subscriptionId: sub?.id || null, billingCustomerId: null, externalId: p.id, status, dueDate: p.dueDate || null, amount: String(p.value || 0), paidAmount: String(p.netValue || p.value || 0), paidAt: null, invoiceUrl: p.invoiceUrl || null, bankSlipUrl: p.bankSlipUrl || null, pixPayload: null, metadata: { billingType: p.billingType, description: p.description, externalReference: p.externalReference } });
+    const proposedStatus = this.invoiceStatus(event.eventType, p.status);
+    const terminalInvoiceStatuses = [InvoiceStatus.CONFIRMED, InvoiceStatus.RECEIVED, InvoiceStatus.REFUNDED, InvoiceStatus.CANCELLED];
+    const status = invoice && terminalInvoiceStatuses.includes(invoice.status)
+      && !terminalInvoiceStatuses.includes(proposedStatus)
+      ? invoice.status
+      : proposedStatus;
+
+    let billingCustomerId: string | null = invoice?.billingCustomerId || null;
+    if (!billingCustomerId && p.customer) {
+      billingCustomerId = (await this.customerRepo.findOne({ where: { unitId: event.unitId, externalId: p.customer } }))?.id || null;
+    }
+    if (!invoice) {
+      invoice = this.invoiceRepo.create({
+        unitId: event.unitId,
+        subscriptionId: sub?.id || null,
+        billingCustomerId,
+        externalId: p.id,
+        status,
+        dueDate: p.dueDate || null,
+        amount: String(p.value || 0),
+        paidAmount: '0',
+        paidAt: null,
+        invoiceUrl: p.invoiceUrl || null,
+        bankSlipUrl: p.bankSlipUrl || null,
+        pixPayload: null,
+        metadata: { billingType: p.billingType, description: p.description, externalReference: p.externalReference },
+      });
+    }
     invoice.status = status;
-    if (['PAYMENT_CONFIRMED','PAYMENT_RECEIVED'].includes(event.eventType)) { invoice.paidAt = new Date(p.paymentDate || p.confirmedDate || Date.now()); invoice.paidAmount = String(p.netValue || p.value || 0); }
+    invoice.subscriptionId = invoice.subscriptionId || sub?.id || null;
+    invoice.billingCustomerId = billingCustomerId;
+    invoice.dueDate = p.dueDate || invoice.dueDate;
+    invoice.amount = String(p.value ?? invoice.amount ?? 0);
+    invoice.invoiceUrl = p.invoiceUrl || invoice.invoiceUrl;
+    invoice.bankSlipUrl = p.bankSlipUrl || invoice.bankSlipUrl;
+    invoice.metadata = {
+      ...(invoice.metadata || {}),
+      billingType: p.billingType || invoice.metadata?.billingType || null,
+      description: p.description ?? invoice.metadata?.description ?? null,
+      externalReference: p.externalReference ?? invoice.metadata?.externalReference ?? null,
+      checkoutSession: p.checkoutSession || invoice.metadata?.checkoutSession || null,
+      providerSubscriptionId: p.subscription || invoice.metadata?.providerSubscriptionId || null,
+      transactionReceiptUrl: p.transactionReceiptUrl || invoice.metadata?.transactionReceiptUrl || null,
+    };
+    if (['PAYMENT_CONFIRMED','PAYMENT_RECEIVED'].includes(event.eventType)) {
+      invoice.paidAt = new Date(p.paymentDate || p.confirmedDate || Date.now());
+      invoice.paidAmount = String(p.netValue || p.value || 0);
+    }
     invoice = await this.invoiceRepo.save(invoice);
+
     let payment = await this.paymentRepo.findOne({ where: { unitId: event.unitId, externalId: p.id } });
     if (!payment) payment = this.paymentRepo.create({ unitId: event.unitId, invoiceId: invoice.id, externalId: p.id, status: PaymentStatus.PENDING, amount: String(p.value || 0), confirmedAt: null, receivedAt: null, rawPayload: p });
-    payment.status = this.paymentStatus(event.eventType); payment.rawPayload = p;
+    const proposedPaymentStatus = this.paymentStatus(event.eventType);
+    const terminalPaymentStatuses = [PaymentStatus.CONFIRMED, PaymentStatus.RECEIVED, PaymentStatus.REFUNDED];
+    if (!terminalPaymentStatuses.includes(payment.status) || terminalPaymentStatuses.includes(proposedPaymentStatus)) {
+      payment.status = proposedPaymentStatus;
+    }
+    payment.rawPayload = p;
     if (event.eventType === 'PAYMENT_CONFIRMED') payment.confirmedAt = new Date();
     if (event.eventType === 'PAYMENT_RECEIVED') payment.receivedAt = new Date();
     await this.paymentRepo.save(payment);
 
     if (['PAYMENT_CONFIRMED','PAYMENT_RECEIVED'].includes(event.eventType)) {
-      if (p.externalReference) {
-        await this.opportunities.convertByExternalReference(event.unitId, p.externalReference, p.subscription || null, event.id);
-        await this.completeDirectSubscriptionCheckout(event.unitId, p.externalReference, p);
+      sub = sub || await this.resolveSubscription(event.unitId, p);
+      const checkoutContext = p.checkoutSession
+        ? await this.checkoutRepo.findOne({ where: { unitId: event.unitId, externalId: String(p.checkoutSession) } })
+        : null;
+      const opportunityId = p.externalReference
+        ? String(p.externalReference)
+        : sub?.sourceOpportunityId || checkoutContext?.opportunityId || null;
+
+      if (opportunityId) {
+        sub = await this.opportunities.convertByExternalReference(
+          event.unitId,
+          opportunityId,
+          p.subscription || sub?.externalSubscriptionId || null,
+          event.id,
+        ) || sub;
+        await this.completeDirectSubscriptionCheckout(event.unitId, opportunityId, p);
       }
-      if (sub && [SubscriptionStatus.PAST_DUE, SubscriptionStatus.SUSPENDED, SubscriptionStatus.PENDING_PAYMENT].includes(sub.status)) await this.subscriptions.transition(sub, SubscriptionStatus.ACTIVE, { source: LifecycleSource.WEBHOOK, reasonCode: 'PAYMENT_RECOVERED', correlationId: event.id });
-    } else if (event.eventType === 'PAYMENT_OVERDUE' && sub?.status === SubscriptionStatus.ACTIVE) {
-      await this.subscriptions.transition(sub, SubscriptionStatus.PAST_DUE, { source: LifecycleSource.WEBHOOK, reasonCode: 'PAYMENT_OVERDUE', correlationId: event.id });
+
+      sub = sub || await this.resolveSubscription(event.unitId, p);
+      if (sub) {
+        if (!sub.externalSubscriptionId && p.subscription) {
+          sub.externalSubscriptionId = String(p.subscription);
+          await this.subRepo.save(sub);
+        }
+        invoice.subscriptionId = sub.id;
+        invoice.metadata = {
+          ...(invoice.metadata || {}),
+          checkoutSession: p.checkoutSession || invoice.metadata?.checkoutSession || null,
+          providerSubscriptionId: p.subscription || invoice.metadata?.providerSubscriptionId || null,
+          transactionReceiptUrl: p.transactionReceiptUrl || invoice.metadata?.transactionReceiptUrl || null,
+        };
+        await this.invoiceRepo.save(invoice);
+        await this.subscriptions.recoverIfCurrent(sub, event.id, LifecycleSource.WEBHOOK);
+      }
+    } else if (event.eventType === 'PAYMENT_OVERDUE' && sub && status === InvoiceStatus.OVERDUE) {
+      await this.subscriptions.markPastDue(sub, { paymentId: p.id, source: LifecycleSource.WEBHOOK, correlationId: event.id });
     } else if (event.eventType === 'PAYMENT_REFUNDED') {
       await this.lifecycle.record({ unitId: event.unitId, subscriptionId: sub?.id || null, personId: sub?.primaryPersonId || null, type: 'payment.refunded', source: LifecycleSource.WEBHOOK, correlationId: event.id, metadata: { paymentId: p.id, amount: p.value } });
     }
@@ -254,7 +359,22 @@ export class WebhooksService {
     if (!external?.id) return false;
     let sub = await this.subRepo.findOne({ where: { unitId: event.unitId, externalSubscriptionId: external.id } });
     if (!sub && external.externalReference) {
-      sub = await this.opportunities.convertByExternalReference(event.unitId, external.externalReference, external.id, event.id);
+      sub = await this.subRepo.findOne({
+        where: { unitId: event.unitId, sourceOpportunityId: String(external.externalReference) },
+      });
+    }
+    if (!sub && external.checkoutSession) {
+      const checkout = await this.checkoutRepo.findOne({
+        where: { unitId: event.unitId, externalId: String(external.checkoutSession) },
+      });
+      if (!checkout) {
+        // O webhook pode chegar enquanto a resposta de POST /checkouts ainda está sendo persistida.
+        // Falhar aqui permite que a fila tente novamente em vez de ignorar definitivamente o vínculo.
+        throw new NotFoundException('Checkout local ainda não disponível para vincular a assinatura do Asaas.');
+      }
+      sub = await this.subRepo.findOne({
+        where: { unitId: event.unitId, sourceOpportunityId: checkout.opportunityId },
+      });
     }
     if (!sub) return false;
     if (!sub.externalSubscriptionId) { sub.externalSubscriptionId = external.id; await this.subRepo.save(sub); }
@@ -296,6 +416,23 @@ export class WebhooksService {
     if (payment.subscription) {
       const byExternal = await this.subRepo.findOne({ where: { unitId, externalSubscriptionId: payment.subscription } });
       if (byExternal) return byExternal;
+    }
+    if (payment.checkoutSession) {
+      const checkout = await this.checkoutRepo.findOne({
+        where: { unitId, externalId: String(payment.checkoutSession) },
+      });
+      if (checkout) {
+        const byCheckout = await this.subRepo.findOne({
+          where: { unitId, sourceOpportunityId: checkout.opportunityId },
+        });
+        if (byCheckout) {
+          if (!byCheckout.externalSubscriptionId && payment.subscription) {
+            byCheckout.externalSubscriptionId = String(payment.subscription);
+            await this.subRepo.save(byCheckout);
+          }
+          return byCheckout;
+        }
+      }
     }
     if (payment.externalReference) {
       const byOpportunity = await this.subRepo.findOne({ where: { unitId, sourceOpportunityId: payment.externalReference } });

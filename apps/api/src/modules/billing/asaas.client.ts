@@ -327,8 +327,10 @@ export class AsaasClient {
   getCustomer(unitId: string, id: string) { return this.call<any>(unitId, 'GET', `/customers/${id}`); }
   listCustomers(unitId: string, limit = 100, offset = 0) { return this.call<any>(unitId, 'GET', '/customers', undefined, { limit, offset }); }
   createCheckout(unitId: string, body: unknown) { return this.call<any>(unitId, 'POST', '/checkouts', body); }
+  cancelCheckout(unitId: string, id: string) { return this.call<any>(unitId, 'POST', `/checkouts/${id}/cancel`); }
   createSubscription(unitId: string, body: unknown) { return this.call<any>(unitId, 'POST', '/subscriptions', body); }
   getSubscription(unitId: string, id: string) { return this.call<any>(unitId, 'GET', `/subscriptions/${id}`); }
+  updateSubscription(unitId: string, id: string, body: unknown) { return this.call<any>(unitId, 'PUT', `/subscriptions/${id}`, body); }
   deleteSubscription(unitId: string, id: string) { return this.call<any>(unitId, 'DELETE', `/subscriptions/${id}`); }
   listSubscriptions(unitId: string, params: Record<string, unknown> = {}) { return this.call<any>(unitId, 'GET', '/subscriptions', undefined, params); }
   subscriptionPayments(unitId: string, id: string, status?: string, limit = 10) {
@@ -338,6 +340,8 @@ export class AsaasClient {
     return this.call<ArrayBuffer>(unitId, 'GET', `/subscriptions/${id}/paymentBook`, undefined, { month, year }, 'arraybuffer');
   }
   createPayment(unitId: string, body: unknown) { return this.call<any>(unitId, 'POST', '/payments', body); }
+  updatePayment(unitId: string, id: string, body: unknown) { return this.call<any>(unitId, 'PUT', `/payments/${id}`, body); }
+  deletePayment(unitId: string, id: string) { return this.call<any>(unitId, 'DELETE', `/payments/${id}`); }
   customerPayments(unitId: string, customer: string, limit = 10, offset = 0) {
     return this.call<any>(unitId, 'GET', '/payments', undefined, { customer, limit, offset });
   }

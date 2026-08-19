@@ -30,6 +30,7 @@ interface PageData {
   limit: number;
   totalPages: number;
   ativos: number;
+  pendentes: number;
   inadimplentes: number;
   inativos: number;
   ativosTit: number;
@@ -45,6 +46,7 @@ interface PageData {
 
 const statusMeta: Record<string, { label: string; colors: string }> = {
   ACTIVE: { label: 'Ativo', colors: 'border-success/20 bg-success/10 text-success' },
+  PENDING: { label: 'Aguardando pagamento', colors: 'border-warning/20 bg-warning/10 text-warning' },
   DELINQUENT: { label: 'Inadimplente', colors: 'border-danger/20 bg-danger/10 text-danger' },
   INACTIVE: { label: 'Inativo', colors: 'border-ink-muted/20 bg-ink-muted/10 text-ink-tertiary' },
 };
@@ -88,10 +90,11 @@ export default function VidasPage() {
   }, [loaded, page, search, statusFilter, subscriptionFilter, estadoFilter, load]);
 
   const totais = useMemo(() => {
-    if (!pageData) return { total: 0, ativos: 0, inadimplentes: 0, inativos: 0, ativosTit: 0, ativosDep: 0, inadTit: 0, inadDep: 0, inatTit: 0, inatDep: 0, totalTit: 0, totalDep: 0 };
+    if (!pageData) return { total: 0, ativos: 0, pendentes: 0, inadimplentes: 0, inativos: 0, ativosTit: 0, ativosDep: 0, inadTit: 0, inadDep: 0, inatTit: 0, inatDep: 0, totalTit: 0, totalDep: 0 };
     return {
       total: pageData.total,
       ativos: pageData.ativos,
+      pendentes: pageData.pendentes || 0,
       inadimplentes: pageData.inadimplentes,
       inativos: pageData.inativos,
       ativosTit: pageData.ativosTit,
@@ -195,6 +198,7 @@ export default function VidasPage() {
             className="rounded-lg border border-edge bg-surface-input px-3 py-2 text-sm text-ink focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/20">
             <option value="">Status</option>
             <option value="ACTIVE">Ativo</option>
+            <option value="PENDING">Aguardando pagamento</option>
             <option value="DELINQUENT">Inadimplente</option>
             <option value="INACTIVE">Inativo</option>
           </select>

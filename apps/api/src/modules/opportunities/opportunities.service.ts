@@ -9,7 +9,7 @@ import {
   PrecheckoutStatus, Sale, Subscription, SubscriptionMember, SubscriptionMemberStatus, SubscriptionStatus,
   Team, TeamMember, UnitRole, User,
 } from '../../database/entities';
-import { AsaasClient } from '../billing/asaas.client';
+import { AsaasApiException, AsaasClient } from '../billing/asaas.client';
 import { BillingService } from '../billing/billing.service';
 import { LifecycleService } from '../lifecycle/lifecycle.service';
 import { PeopleService } from '../people/people.service';
@@ -669,43 +669,271 @@ export class OpportunitiesService {
   }
 
 
-  async convert(unitId:string,opportunityId:string,input:{externalSubscriptionId?:string|null;correlationId?:string;source?:LifecycleSource;actorUserId?:string|null}){return this.dataSource.transaction(async manager=>{const opp=await manager.findOne(Opportunity,{where:{unitId,id:opportunityId},lock:{mode:'pessimistic_write'}});if(!opp)throw new NotFoundException('Oportunidade não encontrada.');let sub=await manager.findOne(Subscription,{where:{unitId,sourceOpportunityId:opp.id}});
-    const contract=await manager.findOne(Contract,{where:{unitId,opportunityId:opp.id,status:ContractStatus.ACCEPTED},order:{version:'DESC'}});
-    const effectiveNegotiation=contract?.snapshot?.negotiation||opp.negotiationSnapshot;
-    const contractMetadata={
-      contractId:contract?.id||null,
-      contractVersion:contract?.version||null,
-      contractHash:contract?.contentHash||null,
-      contractRelationType:contract?.relationType||null,
-      parentContractId:contract?.parentContractId||null,
-      negotiationSnapshot:effectiveNegotiation,
-      appliedPolicyIds:effectiveNegotiation?.policyEvaluation?.appliedPolicyIds||[],
-      contractedLives:effectiveNegotiation?.participants?.contractedLives||null,
-      offerVersionId:opp.offerVersionId,
-    };
-    if(contract){
-      opp.negotiationSnapshot=effectiveNegotiation;
-      opp.expectedValue=Number(effectiveNegotiation?.pricing?.finalAmount||opp.expectedValue||0).toFixed(2);
-      opp.billingCycle=effectiveNegotiation?.cycle||opp.billingCycle;
-      opp.billingType=effectiveNegotiation?.allowedBillingTypes?.[0]||opp.billingType;
+  async convert(
+    unitId:string,
+    opportunityId:string,
+    input:{externalSubscriptionId?:string|null;correlationId?:string;source?:LifecycleSource;actorUserId?:string|null},
+  ){
+    const result=await this.dataSource.transaction(async manager=>{
+      const opp=await manager.findOne(Opportunity,{
+        where:{unitId,id:opportunityId},
+        lock:{mode:'pessimistic_write'},
+      });
+      if(!opp)throw new NotFoundException('Oportunidade não encontrada.');
+
+      let sub=await manager.findOne(Subscription,{where:{unitId,sourceOpportunityId:opp.id}});
+      const fromStatus=sub?.status||SubscriptionStatus.PENDING_PAYMENT;
+      const contract=await manager.findOne(Contract,{
+        where:{unitId,opportunityId:opp.id,status:ContractStatus.ACCEPTED},
+        order:{version:'DESC'},
+      });
+      const effectiveNegotiation=contract?.snapshot?.negotiation||opp.negotiationSnapshot||{};
+      const value=Number(effectiveNegotiation?.pricing?.finalAmount??opp.expectedValue??0);
+      const companyContacts=opp.customerType===CustomerType.COMPANY?{
+        legalRepresentative:contract?.snapshot?.customer?.legalRepresentative||sub?.metadata?.companyContacts?.legalRepresentative||null,
+        financialContact:contract?.snapshot?.customer?.financialContact||sub?.metadata?.companyContacts?.financialContact||null,
+      }:null;
+      const contractMetadata={
+        contractId:contract?.id||null,
+        contractVersion:contract?.version||null,
+        contractHash:contract?.contentHash||null,
+        contractRelationType:contract?.relationType||null,
+        parentContractId:contract?.parentContractId||null,
+        negotiationSnapshot:effectiveNegotiation,
+        appliedPolicyIds:effectiveNegotiation?.policyEvaluation?.appliedPolicyIds||[],
+        contractedLives:effectiveNegotiation?.participants?.contractedLives??sub?.metadata?.contractedLives??null,
+        contractedDependents:effectiveNegotiation?.participants?.dependentCount??sub?.metadata?.contractedDependents??0,
+        contractedAmount:value>0?value:sub?.metadata?.contractedAmount??null,
+        billingCycle:effectiveNegotiation?.cycle||opp.billingCycle||sub?.metadata?.billingCycle||null,
+        billingType:effectiveNegotiation?.billingType
+          ||(opp.billingType&&effectiveNegotiation?.allowedBillingTypes?.includes?.(opp.billingType)?opp.billingType:null)
+          ||effectiveNegotiation?.allowedBillingTypes?.[0]
+          ||opp.billingType
+          ||sub?.metadata?.billingType
+          ||null,
+        companyContacts,
+        offerVersionId:opp.offerVersionId,
+        lastAppliedContractId:contract?.id||sub?.metadata?.lastAppliedContractId||null,
+      };
+
+      if(contract){
+        opp.negotiationSnapshot=effectiveNegotiation;
+        if(value>0)opp.expectedValue=value.toFixed(2);
+        opp.billingCycle=effectiveNegotiation?.cycle||opp.billingCycle;
+        opp.billingType=effectiveNegotiation?.billingType
+          ||(opp.billingType&&effectiveNegotiation?.allowedBillingTypes?.includes?.(opp.billingType)?opp.billingType:null)
+          ||effectiveNegotiation?.allowedBillingTypes?.[0]
+          ||opp.billingType;
+      }
+
+      const oldExternalSubscriptionId=sub?.externalSubscriptionId||null;
+      const replacementExternalSubscriptionId=input.externalSubscriptionId||null;
+      const providerSubscriptionToCancel=contract?.parentContractId
+        && oldExternalSubscriptionId
+        && replacementExternalSubscriptionId
+        && oldExternalSubscriptionId!==replacementExternalSubscriptionId
+        ? oldExternalSubscriptionId
+        : sub?.metadata?.pendingProviderCancellationId||null;
+
+      if(!sub){
+        sub=manager.create(Subscription,{
+          unitId,
+          primaryPersonId:opp.primaryPersonId,
+          planPriceId:opp.planPriceId,
+          sourceOpportunityId:opp.id,
+          billingConnectionId:(await this.billing.connectionEntity(unitId))?.id||null,
+          externalSubscriptionId:replacementExternalSubscriptionId,
+          status:SubscriptionStatus.ACTIVE,
+          financialStatus:FinancialStatus.CURRENT,
+          accessStatus:AccessStatus.ENABLED,
+          startedAt:new Date(),
+          firstActiveAt:new Date(),
+          currentPeriodStart:new Date(),
+          currentPeriodEnd:null,
+          cancellationScheduledAt:null,
+          cancelledAt:null,
+          lastReactivatedAt:null,
+          cancellationReasonCode:null,
+          cancellationReasonText:null,
+          metadata:{...contractMetadata,pendingProviderCancellationId:providerSubscriptionToCancel},
+        });
+      }else{
+        if(replacementExternalSubscriptionId)sub.externalSubscriptionId=replacementExternalSubscriptionId;
+        sub.status=SubscriptionStatus.ACTIVE;
+        sub.financialStatus=FinancialStatus.CURRENT;
+        sub.accessStatus=AccessStatus.ENABLED;
+        sub.startedAt||=new Date();
+        sub.firstActiveAt||=new Date();
+        sub.cancelledAt=null;
+        sub.cancellationScheduledAt=null;
+        sub.metadata={
+          ...(sub.metadata||{}),
+          ...contractMetadata,
+          delinquencyStartedAt:null,
+          suspensionDueAt:null,
+          pendingProviderCancellationId:providerSubscriptionToCancel,
+        };
+      }
+      sub=await manager.save(sub);
+
+      const desiredOpportunityMembers=await manager.find(OpportunityMember,{where:{unitId,opportunityId:opp.id}});
+      const existingMembers=await manager.find(SubscriptionMember,{where:{unitId,subscriptionId:sub.id}});
+      const desired=new Map<string,{role:MemberRole;relationship:string|null}>();
+      desired.set(opp.primaryPersonId,{role:MemberRole.PRIMARY,relationship:null});
+      if(opp.customerType===CustomerType.PERSON){
+        for(const member of desiredOpportunityMembers){
+          desired.set(member.personId,{role:member.role,relationship:member.relationship});
+        }
+      }
+      const currentByPerson=new Map(existingMembers.map(member=>[member.personId,member]));
+      const now=new Date();
+      for(const [personId,data] of desired){
+        let member=currentByPerson.get(personId);
+        if(!member){
+          member=manager.create(SubscriptionMember,{
+            unitId,subscriptionId:sub.id,personId,role:data.role,
+            status:SubscriptionMemberStatus.ACTIVE,joinedAt:now,leftAt:null,relationship:data.relationship,
+          });
+        }else{
+          member.role=data.role;
+          member.relationship=data.relationship;
+          member.status=SubscriptionMemberStatus.ACTIVE;
+          member.leftAt=null;
+        }
+        await manager.save(member);
+      }
+      if(opp.customerType===CustomerType.PERSON){
+        for(const member of existingMembers){
+          if(member.role===MemberRole.PRIMARY||desired.has(member.personId))continue;
+          if(member.status===SubscriptionMemberStatus.ACTIVE){
+            member.status=SubscriptionMemberStatus.INACTIVE;
+            member.leftAt=now;
+            await manager.save(member);
+          }
+        }
+      }
+
+      opp.status=OpportunityStatus.WON;
+      opp.commercialStatus=CommercialStatus.CONVERTED;
+      opp.wonAt=opp.wonAt||new Date();
+      await manager.save(opp);
+
+      const existingSale=await manager.findOne(Sale,{where:{unitId,opportunityId:opp.id}});
+      if(!existingSale){
+        await manager.save(manager.create(Sale,{
+          unitId,opportunityId:opp.id,subscriptionId:sub.id,salespersonId:opp.ownerUserId,
+          grossAmount:opp.expectedValue||'0',commissionAmount:(Number(opp.expectedValue||0)*0.1).toFixed(2),commissionPaid:false,soldAt:contract?.acceptedAt||new Date(),
+        }));
+      }
+      return{sub,fromStatus,providerSubscriptionToCancel};
+    });
+
+    if(result.providerSubscriptionToCancel){
+      try{
+        await this.asaas.deleteSubscription(unitId,result.providerSubscriptionToCancel);
+      }catch(error){
+        if(!(error instanceof AsaasApiException)||error.providerStatus!==404)throw error;
+      }
+      result.sub.metadata={...(result.sub.metadata||{}),pendingProviderCancellationId:null};
+      await this.subscriptionRepo.save(result.sub);
     }
-    if(!sub){sub=manager.create(Subscription,{unitId,primaryPersonId:opp.primaryPersonId,planPriceId:opp.planPriceId,sourceOpportunityId:opp.id,billingConnectionId:(await this.billing.connectionEntity(unitId))?.id||null,externalSubscriptionId:input.externalSubscriptionId||null,status:SubscriptionStatus.ACTIVE,financialStatus:FinancialStatus.CURRENT,accessStatus:AccessStatus.ENABLED,startedAt:new Date(),firstActiveAt:new Date(),currentPeriodStart:new Date(),currentPeriodEnd:null,cancellationScheduledAt:null,cancelledAt:null,lastReactivatedAt:null,cancellationReasonCode:null,cancellationReasonText:null,metadata:{billingCycle:opp.billingCycle,billingType:opp.billingType,...contractMetadata}});sub=await manager.save(sub);const members=await manager.find(OpportunityMember,{where:{unitId,opportunityId:opp.id}});for(const m of members)await manager.save(manager.create(SubscriptionMember,{unitId,subscriptionId:sub.id,personId:m.personId,role:m.role,status:SubscriptionMemberStatus.ACTIVE,joinedAt:new Date(),leftAt:null,relationship:m.relationship}));}else{if(input.externalSubscriptionId)sub.externalSubscriptionId=input.externalSubscriptionId;sub.status=SubscriptionStatus.ACTIVE;sub.financialStatus=FinancialStatus.CURRENT;sub.accessStatus=AccessStatus.ENABLED;sub.firstActiveAt||=new Date();sub.metadata={...(sub.metadata||{}),...contractMetadata};await manager.save(sub);}opp.status=OpportunityStatus.WON;opp.commercialStatus=CommercialStatus.CONVERTED;opp.wonAt=new Date();await manager.save(opp);const existingSale=await manager.findOne(Sale,{where:{unitId,opportunityId:opp.id}});if(!existingSale)await manager.save(manager.create(Sale,{unitId,opportunityId:opp.id,subscriptionId:sub.id,salespersonId:opp.ownerUserId,grossAmount:opp.expectedValue||'0',commissionAmount:(Number(opp.expectedValue||0)*0.1).toFixed(2),commissionPaid:false,soldAt:new Date()}));return sub;}).then(async sub=>{
     await this.precheckoutRepo.update({unitId,opportunityId},{status:PrecheckoutStatus.COMPLETED});
     await this.checkoutRepo.update({unitId,opportunityId,status:CheckoutStatus.PENDING},{status:CheckoutStatus.PAID});
-    await this.lifecycle.record({
-      unitId,subscriptionId:sub.id,personId:sub.primaryPersonId,type:'subscription.activated',
-      fromStatus:SubscriptionStatus.PENDING_PAYMENT,toStatus:SubscriptionStatus.ACTIVE,
-      source:input.source||LifecycleSource.SYSTEM,actorUserId:input.actorUserId,
-      correlationId:input.correlationId,metadata:{opportunityId,contractId:sub.metadata?.contractId||null},
-    });
-    return sub;
-  })}
-
+    if(result.fromStatus!==SubscriptionStatus.ACTIVE){
+      await this.lifecycle.record({
+        unitId,subscriptionId:result.sub.id,personId:result.sub.primaryPersonId,type:'subscription.activated',
+        fromStatus:result.fromStatus,toStatus:SubscriptionStatus.ACTIVE,
+        source:input.source||LifecycleSource.SYSTEM,actorUserId:input.actorUserId,
+        correlationId:input.correlationId,metadata:{opportunityId,contractId:result.sub.metadata?.contractId||null},
+      });
+    }
+    return result.sub;
+  }
   async convertByCheckout(unitId:string,checkoutExternalId:string,payload:any){const checkout=await this.checkoutRepo.findOne({where:{unitId,externalId:checkoutExternalId}});if(!checkout)throw new NotFoundException('Checkout não encontrado.');checkout.status=CheckoutStatus.PAID;await this.checkoutRepo.save(checkout);const externalSub=payload?.checkout?.subscription?.id||payload?.subscription?.id||null;return this.convert(unitId,checkout.opportunityId,{externalSubscriptionId:externalSub,correlationId:checkoutExternalId,source:LifecycleSource.WEBHOOK})}
   async convertByExternalReference(unitId:string,reference:string,externalSubscriptionId?:string|null,correlationId?:string){const opp=await this.repo.findOne({where:{unitId,id:reference}});if(!opp)return null;return this.convert(unitId,opp.id,{externalSubscriptionId,correlationId,source:LifecycleSource.WEBHOOK})}
   async paymentBook(unitId:string,id:string,userId?:string,unitRole?:UnitRole|null,globalRole?:GlobalRole){const opp=await this.getEntity(unitId,id,userId,unitRole,globalRole);const sub=await this.subscriptionRepo.findOne({where:{unitId,sourceOpportunityId:opp.id}});if(!sub?.externalSubscriptionId)throw new BadRequestException('Nenhuma assinatura externa vinculada.');if(process.env.ASAAS_MOCK==='true')return Buffer.from('Mock payment book');const now=new Date();return Buffer.from(await this.asaas.paymentBook(unitId,sub.externalSubscriptionId,now.getMonth()+1,now.getFullYear()) as any)}
 
-  private async createPendingSubscription(opp:Opportunity,externalId:string){let sub=await this.subscriptionRepo.findOne({where:{unitId:opp.unitId,sourceOpportunityId:opp.id}});if(sub)return sub;sub=await this.subscriptionRepo.save(this.subscriptionRepo.create({unitId:opp.unitId,primaryPersonId:opp.primaryPersonId,planPriceId:opp.planPriceId,sourceOpportunityId:opp.id,billingConnectionId:(await this.billing.connectionEntity(opp.unitId))?.id||null,externalSubscriptionId:externalId,status:SubscriptionStatus.PENDING_PAYMENT,financialStatus:FinancialStatus.UNKNOWN,accessStatus:AccessStatus.DISABLED,startedAt:null,firstActiveAt:null,currentPeriodStart:null,currentPeriodEnd:null,cancellationScheduledAt:null,cancelledAt:null,lastReactivatedAt:null,cancellationReasonCode:null,cancellationReasonText:null,metadata:{billingCycle:opp.billingCycle,billingType:opp.billingType,negotiationSnapshot:opp.negotiationSnapshot,offerVersionId:opp.offerVersionId}}));const ms=await this.memberRepo.find({where:{unitId:opp.unitId,opportunityId:opp.id}});for(const m of ms)await this.dataSource.getRepository(SubscriptionMember).save(this.dataSource.getRepository(SubscriptionMember).create({unitId:opp.unitId,subscriptionId:sub.id,personId:m.personId,role:m.role,status:SubscriptionMemberStatus.ACTIVE,joinedAt:new Date(),leftAt:null,relationship:m.relationship}));return sub}
+  private async createPendingSubscription(opp: Opportunity, externalId: string) {
+    let sub = await this.subscriptionRepo.findOne({
+      where: { unitId: opp.unitId, sourceOpportunityId: opp.id },
+    });
+    if (!sub) {
+      sub = await this.subscriptionRepo.save(this.subscriptionRepo.create({
+        unitId: opp.unitId,
+        primaryPersonId: opp.primaryPersonId,
+        planPriceId: opp.planPriceId,
+        sourceOpportunityId: opp.id,
+        billingConnectionId: (await this.billing.connectionEntity(opp.unitId))?.id || null,
+        externalSubscriptionId: externalId,
+        status: SubscriptionStatus.PENDING_PAYMENT,
+        financialStatus: FinancialStatus.UNKNOWN,
+        accessStatus: AccessStatus.DISABLED,
+        startedAt: null,
+        firstActiveAt: null,
+        currentPeriodStart: null,
+        currentPeriodEnd: null,
+        cancellationScheduledAt: null,
+        cancelledAt: null,
+        lastReactivatedAt: null,
+        cancellationReasonCode: null,
+        cancellationReasonText: null,
+        metadata: {
+          billingCycle: opp.billingCycle,
+          billingType: opp.billingType,
+          negotiationSnapshot: opp.negotiationSnapshot,
+          contractedAmount: Number(opp.negotiationSnapshot?.pricing?.finalAmount ?? opp.expectedValue ?? 0) || null,
+          contractedLives: opp.negotiationSnapshot?.participants?.contractedLives ?? null,
+          contractedDependents: opp.negotiationSnapshot?.participants?.dependentCount ?? 0,
+          customerType: opp.customerType,
+          offerVersionId: opp.offerVersionId,
+          pendingCreatedAt: new Date().toISOString(),
+        },
+      }));
+    } else if (!sub.externalSubscriptionId) {
+      sub.externalSubscriptionId = externalId;
+      await this.subscriptionRepo.save(sub);
+    }
+
+    const subscriptionMembers = this.dataSource.getRepository(SubscriptionMember);
+    const opportunityMembers = await this.memberRepo.find({
+      where: { unitId: opp.unitId, opportunityId: opp.id },
+    });
+    const desired = [
+      { personId: opp.primaryPersonId, role: MemberRole.PRIMARY, relationship: null as string | null },
+      ...opportunityMembers.map((member) => ({
+        personId: member.personId,
+        role: member.role,
+        relationship: member.relationship,
+      })),
+    ];
+    for (const item of desired) {
+      const existing = await subscriptionMembers.findOne({
+        where: { unitId: opp.unitId, subscriptionId: sub.id, personId: item.personId },
+      });
+      if (existing) {
+        if (existing.status !== SubscriptionMemberStatus.ACTIVE || existing.role !== item.role) {
+          existing.status = SubscriptionMemberStatus.ACTIVE;
+          existing.role = item.role;
+          existing.relationship = item.relationship;
+          existing.leftAt = null;
+          await subscriptionMembers.save(existing);
+        }
+        continue;
+      }
+      await subscriptionMembers.save(subscriptionMembers.create({
+        unitId: opp.unitId,
+        subscriptionId: sub.id,
+        personId: item.personId,
+        role: item.role,
+        status: SubscriptionMemberStatus.ACTIVE,
+        joinedAt: new Date(),
+        leftAt: null,
+        relationship: item.relationship,
+      }));
+    }
+    return sub;
+  }
+
   private async ensureCustomer(unitId:string,opp:Opportunity,p:Person){let c=await this.customerRepo.findOne({where:{unitId,personId:p.id,provider:BillingProviderName.ASAAS}});if(c)return c;const x=await this.asaas.createCustomer(unitId,{name:p.name,cpfCnpj:p.taxId,email:p.email,mobilePhone:p.phone,address:p.address,addressNumber:p.addressNumber,complement:p.complement,province:p.district,postalCode:p.postalCode,state:p.state,externalReference:p.id});c=await this.customerRepo.save(this.customerRepo.create({unitId,personId:p.id,provider:BillingProviderName.ASAAS,externalId:x.id,metadata:{}}));opp.asaasCustomerId=x.id;await this.repo.save(opp);return c}
   private async getEntity(unitId:string,id:string,userId?:string,unitRole?:UnitRole|null,globalRole?:GlobalRole){
     const opportunity=await this.repo.findOne({where:{unitId,id}});

@@ -18,7 +18,9 @@
     "seed": "npm run seed -w @club-platform/api",
     "seed:test-users": "npm run seed:test-users -w @club-platform/api",
     "seed:commercial-feature": "npm run seed:commercial-feature -w @club-platform/api",
-    "seed:test-all": "npm run seed:test-all -w @club-platform/api"
+    "seed:test-all": "npm run seed:test-all -w @club-platform/api",
+    "backfill:subscriber-contracts": "npm run backfill:subscriber-contracts -w @club-platform/api --",
+    "test:subscriber-post-sale": "npm run test:subscriber-post-sale -w @club-platform/api"
   },
   "engines": {
     "node": ">=20.0.0",

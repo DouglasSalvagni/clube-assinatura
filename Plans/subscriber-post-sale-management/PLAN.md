@@ -35,7 +35,7 @@ A oportunidade deve permanecer registrada como histórico comercial (`WON/CONVER
 - `ACTIVE`: assinatura adimplente e ativa.
 - `PAST_DUE`: existe cobrança vencida dentro do período de carência.
 - `SUSPENDED`: acesso suspenso após regra de inadimplência ou ação administrativa controlada.
-- `CANCELED`: assinatura encerrada.
+- `CANCELLED`: assinatura encerrada.
 
 Avaliar compatibilidade com os enums atuais antes de criar novos valores. Se já houver estados equivalentes, reutilizá-los e migrar apenas o necessário.
 
@@ -46,9 +46,11 @@ Avaliar compatibilidade com os enums atuais antes de criar novos valores. Se já
 - `PAYMENT_OVERDUE` → `PAST_DUE`;
 - fim da carência sem regularização → `SUSPENDED`;
 - pagamento que regulariza a pendência → `ACTIVE`;
-- cancelamento → `CANCELED`.
+- cancelamento → `CANCELLED`.
 
 Toda transição deve ser idempotente, auditável e vinculada ao evento que a causou.
+
+A carência padrão implementada é de **5 dias**, configurável por plano, unidade ou pela variável `SUBSCRIPTION_DELINQUENCY_GRACE_DAYS`. O worker aplica a verificação periodicamente por `DELINQUENCY_ENFORCEMENT_INTERVAL_MS`.
 
 ---
 
@@ -99,12 +101,7 @@ A inclusão/remoção deve respeitar limites contratuais e políticas vigentes.
 
 Não permitir inclusão simples de novo dependente diretamente na assinatura vigente.
 
-Mudanças que ampliem a cobertura devem ocorrer por fluxo contratual explícito, por exemplo:
-
-- aditivo com cobrança proporcional, se essa regra for adotada; ou
-- alteração válida apenas na renovação.
-
-A implementação inicial pode bloquear a inclusão e deixar a cobrança proporcional como evolução posterior, desde que a regra esteja explícita na interface.
+**Decisão da implementação inicial:** novos dependentes em PF anual somente podem ser incluídos por **renovação contratual**. Não será aplicado pró-rata automático nem inclusão por aditivo no meio da vigência. Edição cadastral de dependente já existente continua permitida sem recálculo de preço.
 
 ---
 
@@ -310,7 +307,17 @@ Não implementar como comportamento padrão:
 
 ---
 
-## 13. Critérios de conclusão
+## 13. Decisões técnicas da implementação atual
+
+- Não foi necessária migration nesta etapa: snapshots e metadados existentes suportam os novos vínculos e regras.
+- Para alterações contratuais sem nova cobrança, a assinatura recorrente existente é atualizada no Asaas somente após o aceite.
+- Para substituição/renovação com nova contratação, a assinatura anterior só é cancelada após a nova contratação ser efetivada, com mecanismo de reconciliação em caso de falha.
+- Eventos `SUBSCRIPTION_*` não ativam o assinante por si só; a ativação depende de pagamento confirmado/recebido ou checkout efetivamente pago.
+- “Quitar Débitos” consolida cobranças vencidas em uma cobrança existente e remove as substituídas, em vez de criar uma dívida adicional.
+
+---
+
+## 14. Critérios de conclusão
 
 A implementação estará funcionalmente concluída quando:
 
@@ -324,3 +331,26 @@ A implementação estará funcionalmente concluída quando:
 - a assinatura recorrente do Asaas refletir somente condições vigentes e aceitas;
 - a tela do assinante concentrar cadastro, contrato, participantes, cobranças e histórico;
 - o fluxo de quitação de débitos não puder gerar dívida duplicada.
+
+## 12. Aprovação comercial de alterações pós-venda
+
+Quando um aditivo, renovação ou substituição sair da política comercial configurada, a emissão da nova versão contratual exige uma aprovação específica para aquela revisão. A aprovação fica vinculada ao contrato-base, ao `contentHash` vigente e às condições financeiras solicitadas.
+
+Uma aprovação de negociação original não autoriza automaticamente uma alteração pós-venda. Se o contrato-base mudar depois da solicitação, a aprovação anterior deixa de ser válida para a nova revisão.
+
+## 13. Compatibilidade de assinaturas antigas
+
+A compatibilidade histórica é tratada pelo script `backfill-subscription-contract-metadata.ts`.
+
+Regras:
+
+- priorizar o último contrato `ACCEPTED` e seu snapshot;
+- usar metadados históricos já existentes quando seguros;
+- usar snapshot da oportunidade somente como fallback histórico;
+- nunca recorrer à tabela global atual para preencher preço antigo;
+- listar assinaturas sem fonte histórica segura para revisão manual;
+- executar em dry-run por padrão e somente persistir com `--apply`.
+
+## 14. Critério de liberação
+
+A implementação de código é considerada concluída quando os testes automatizados do pós-venda estiverem aprovados. A liberação em produção continua condicionada a typecheck/Jest oficial, backfill em banco real, validação no Asaas Sandbox e piloto operacional conforme `SANDBOX-RUNBOOK.md`.

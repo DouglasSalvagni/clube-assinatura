@@ -41,6 +41,24 @@ type ContractSummary = {
   requiresPayment?: boolean;
   acceptedAt?: string | null;
   parentContractId?: string | null;
+  snapshot?: any;
+  templateVersionId?: string | null;
+};
+
+type RevisionDraftState = {
+  currentContract: ContractSummary;
+  draft: ContractSummary | null;
+  policyEvaluation: PolicyEvaluation | null;
+  pendingPrecheckout?: PendingRevisionPrecheckout | null;
+};
+
+type PendingRevisionPrecheckout = {
+  id: string;
+  status: string;
+  contractId: string;
+  relationType?: string | null;
+  expiresAt?: string | null;
+  checkout?: { id: string; status: string; url?: string | null; expiresAt?: string | null } | null;
 };
 
 type ApprovalSummary = {
@@ -107,6 +125,7 @@ export default function NegotiationWorkspacePage() {
   const [teams, setTeams] = useState<Team[]>([]);
   const [users, setUsers] = useState<User[]>([]);
   const [contracts, setContracts] = useState<ContractSummary[]>([]);
+  const [revisionDraft, setRevisionDraft] = useState<RevisionDraftState | null>(null);
   const [priceTable, setPriceTable] = useState<PriceTableVersion | null>(null);
   const [currentPriceTable, setCurrentPriceTable] = useState<PriceTableVersion | null>(null);
   const [contractOptions, setContractOptions] = useState<ContractTemplateOption[]>([]);
@@ -138,6 +157,21 @@ export default function NegotiationWorkspacePage() {
       const item = await api(`/oportunidades/${oportunidadeId}`);
       setOpportunity(item);
       setAssignment({ teamId: item.teamId || '', ownerUserId: item.ownerUserId || '' });
+      const postSaleDraft = item.commercialStatus === 'CONVERTED'
+        ? await api(`/commercial/opportunities/${oportunidadeId}/revision-draft`).catch(() => null)
+        : null;
+      setRevisionDraft(postSaleDraft);
+      if (postSaleDraft?.draft) {
+        const draftRevision = postSaleDraft.draft.snapshot?.revision || {};
+        setRevision((current) => ({
+          ...current,
+          relationType: postSaleDraft.draft.relationType || current.relationType,
+          reason: draftRevision.reason || postSaleDraft.draft.changeReason || current.reason,
+          notes: draftRevision.changes?.notes || current.notes,
+          effectiveAt: draftRevision.effectiveAt || draftRevision.changes?.effectiveAt || current.effectiveAt,
+          requiresPayment: postSaleDraft.draft.requiresPayment === true,
+        }));
+      }
       const [currentTableResult, linkedTableResult, templateResult] = await Promise.all([
         api(`/commercial/price-tables/current?customerType=${item.customerType}`).catch(() => null),
         item.priceTableVersionId
@@ -155,8 +189,8 @@ export default function NegotiationWorkspacePage() {
       setCurrentPriceTable(currentTable);
       setPriceTable(table);
       setContractOptions(Array.isArray(templateResult) ? templateResult : templateResult.data || []);
-      const snapshot = item.negotiationSnapshot || {};
-      const cycle = item.cycle || snapshot.cycle || 'MONTHLY';
+      const snapshot = postSaleDraft?.draft?.snapshot?.negotiation || item.negotiationSnapshot || {};
+      const cycle = snapshot.cycle || item.cycle || 'MONTHLY';
       let allowedBillingTypes: string[] = snapshot.allowedBillingTypes?.length
         ? snapshot.allowedBillingTypes
         : [item.billingType || snapshot.billingType || 'CREDIT_CARD'];
@@ -169,7 +203,7 @@ export default function NegotiationWorkspacePage() {
             || (type === 'PIX' && cycle === 'YEARLY')),
         ])];
       }
-      const preferredBillingType = item.billingType || snapshot.billingType || 'CREDIT_CARD';
+      const preferredBillingType = snapshot.billingType || item.billingType || 'CREDIT_CARD';
       setForm({
         cycle,
         billingType: allowedBillingTypes.includes(preferredBillingType) ? preferredBillingType : 'CREDIT_CARD',
@@ -187,15 +221,21 @@ export default function NegotiationWorkspacePage() {
           ?? table?.annualDiscountPercent
           ?? 0,
         ),
-        contractTemplateVersionId: item.contractTemplateVersionId
+        contractTemplateVersionId: snapshot.contractTemplateVersionId
+          || postSaleDraft?.draft?.templateVersionId
+          || item.contractTemplateVersionId
           || snapshot.contractTemplateVersionId
           || table?.contractTemplateVersionId
           || '',
       });
-      try {
-        setEvaluation(await api(`/commercial/opportunities/${oportunidadeId}/evaluation`));
-      } catch {
-        setEvaluation(null);
+      if (postSaleDraft) {
+        setEvaluation(postSaleDraft.policyEvaluation || null);
+      } else {
+        try {
+          setEvaluation(await api(`/commercial/opportunities/${oportunidadeId}/evaluation`));
+        } catch {
+          setEvaluation(null);
+        }
       }
       try {
         setContracts(await api(`/commercial/opportunities/${oportunidadeId}/contracts`));
@@ -296,10 +336,13 @@ export default function NegotiationWorkspacePage() {
       : [];
   const canApprove = user?.globalRole === 'INSTALLATION_ADMIN' || ['OWNER', 'ADMIN', 'MANAGER'].includes(String(role));
   const latestAcceptedContract = contracts.find(contract => contract.status === 'ACCEPTED');
+  const isConverted = opportunity?.commercialStatus === 'CONVERTED';
+  const currentContract = revisionDraft?.currentContract || latestAcceptedContract;
+  const currentTerms = currentContract?.snapshot?.negotiation || opportunity?.negotiationSnapshot || {};
 
   async function createRevision(event: FormEvent) {
     event.preventDefault();
-    if (!latestAcceptedContract) return;
+    if (!currentContract) return;
     setBusy(true);
     setError('');
     try {
@@ -325,15 +368,32 @@ export default function NegotiationWorkspacePage() {
           lives: Number(form.lives),
         });
       }
-      const result = await api(`/commercial/contracts/${latestAcceptedContract.id}/revisions`, {
-        method: 'POST',
-        body: JSON.stringify({
-          relationType: revision.relationType,
-          reason: revision.reason,
-          changes,
-          requiresPayment: revision.requiresPayment,
-        }),
-      });
+      let result;
+      if (isConverted) {
+        const savedDraft = await api(`/commercial/opportunities/${oportunidadeId}/revision-draft`, {
+          method: 'PUT',
+          body: JSON.stringify({
+            relationType: revision.relationType,
+            reason: revision.reason,
+            requiresPayment: revision.requiresPayment,
+            contractTemplateVersionId: form.contractTemplateVersionId || undefined,
+            changes,
+          }),
+        });
+        setRevisionDraft(savedDraft);
+        setEvaluation(savedDraft.policyEvaluation || null);
+        result = await api(`/commercial/contracts/${currentContract.id}/revisions/from-draft`, { method: 'POST' });
+      } else {
+        result = await api(`/commercial/contracts/${currentContract.id}/revisions`, {
+          method: 'POST',
+          body: JSON.stringify({
+            relationType: revision.relationType,
+            reason: revision.reason,
+            changes,
+            requiresPayment: revision.requiresPayment,
+          }),
+        });
+      }
       const url = `${window.location.origin}${result.precheckout.url}`;
       setRevisionUrl(url);
       await navigator.clipboard?.writeText(url);
@@ -341,6 +401,37 @@ export default function NegotiationWorkspacePage() {
       await load();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Não foi possível criar a alteração contratual.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function reissueRevisionPrecheckout() {
+    setBusy(true);
+    setError('');
+    try {
+      const result = await api(`/commercial/opportunities/${oportunidadeId}/revision-precheckout/reissue`, { method: 'POST' });
+      const url = `${window.location.origin}${result.precheckout.url}`;
+      setRevisionUrl(url);
+      await navigator.clipboard?.writeText(url);
+      await load();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Não foi possível reemitir o link da alteração.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function revokeRevisionPrecheckout() {
+    if (!window.confirm('Anular esta alteração pendente? O link deixará de funcionar e, se houver checkout/assinatura pendente no Asaas, ela também será cancelada. A assinatura atual permanecerá ativa.')) return;
+    setBusy(true);
+    setError('');
+    try {
+      await api(`/commercial/opportunities/${oportunidadeId}/revision-precheckout/revoke`, { method: 'POST' });
+      setRevisionUrl('');
+      await load();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Não foi possível anular a alteração pendente.');
     } finally {
       setBusy(false);
     }
@@ -433,52 +524,57 @@ export default function NegotiationWorkspacePage() {
     if (priceTable) applyPriceTableDefaults(priceTable);
   }
 
-  function negotiationPayload() {
-    if (!opportunity) return null;
-    const discounts = Number(form.discountPercent) > 0
-      ? [{ type: 'PERCENTAGE', value: Number(form.discountPercent), reason: 'Negociação comercial' }]
-      : [];
-    return {
-      customerType: opportunity.customerType,
-      priceTableVersionId: priceTable?.id || undefined,
-      contractTemplateVersionId: form.contractTemplateVersionId || undefined,
-      cycle: opportunity.customerType === 'COMPANY' ? 'MONTHLY' : form.cycle,
-      billingType: form.billingType,
-      allowedBillingTypes: form.allowedBillingTypes,
-      negotiation: opportunity.customerType === 'COMPANY'
-        ? {
-            baseAmount: Number(form.unitPrice),
-            unitPrice: Number(form.unitPrice),
-            lives: Number(form.lives),
-            discounts,
-          }
-        : {
-            baseAmount: Number(form.holderAmount),
-            dependentAmount: Number(form.dependentAmount),
-            dependentCount: Number(form.dependentCount),
-            annualDiscountPercent: Number(form.annualDiscountPercent || 0),
-            discounts,
-          },
-    };
-  }
-
-  async function persistNegotiation() {
-    const payload = negotiationPayload();
-    if (!payload) throw new Error('Oportunidade não carregada.');
-    return api(`/oportunidades/${oportunidadeId}`, {
-      method: 'PATCH',
-      body: JSON.stringify(payload),
-    });
-  }
-
   async function save(event: FormEvent) {
     event.preventDefault();
     if (!opportunity) return;
     setBusy(true);
     setError('');
     try {
-      await persistNegotiation();
-      await load();
+      const discounts = Number(form.discountPercent) > 0
+        ? [{ type: 'PERCENTAGE', value: Number(form.discountPercent), reason: 'Negociação comercial' }]
+        : [];
+      const changes = opportunity.customerType === 'COMPANY'
+        ? {
+            cycle: 'MONTHLY', unitPrice: Number(form.unitPrice), lives: Number(form.lives),
+            allowedBillingTypes: form.allowedBillingTypes, discounts,
+            notes: revision.notes || undefined, effectiveAt: revision.effectiveAt || undefined,
+          }
+        : {
+            cycle: form.cycle, holderAmount: Number(form.holderAmount), dependentAmount: Number(form.dependentAmount),
+            dependentCount: Number(form.dependentCount), annualDiscountPercent: Number(form.annualDiscountPercent || 0),
+            allowedBillingTypes: form.allowedBillingTypes, discounts,
+            notes: revision.notes || undefined, effectiveAt: revision.effectiveAt || undefined,
+          };
+      if (isConverted) {
+        const result = await api(`/commercial/opportunities/${oportunidadeId}/revision-draft`, {
+          method: 'PUT',
+          body: JSON.stringify({
+            relationType: revision.relationType,
+            reason: revision.reason || undefined,
+            requiresPayment: revision.requiresPayment,
+            contractTemplateVersionId: form.contractTemplateVersionId || undefined,
+            changes,
+          }),
+        });
+        setRevisionDraft(result);
+        setEvaluation(result.policyEvaluation || null);
+      } else {
+        await api(`/oportunidades/${oportunidadeId}`, {
+          method: 'PATCH',
+          body: JSON.stringify({
+            customerType: opportunity.customerType,
+            priceTableVersionId: priceTable?.id || undefined,
+            contractTemplateVersionId: form.contractTemplateVersionId || undefined,
+            cycle: opportunity.customerType === 'COMPANY' ? 'MONTHLY' : form.cycle,
+            billingType: form.billingType,
+            allowedBillingTypes: form.allowedBillingTypes,
+            negotiation: opportunity.customerType === 'COMPANY'
+              ? { baseAmount: Number(form.unitPrice), unitPrice: Number(form.unitPrice), lives: Number(form.lives), discounts }
+              : { baseAmount: Number(form.holderAmount), dependentAmount: Number(form.dependentAmount), dependentCount: Number(form.dependentCount), annualDiscountPercent: Number(form.annualDiscountPercent || 0), discounts },
+          }),
+        });
+        await load();
+      }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Falha ao salvar negociação.');
     } finally {
@@ -531,9 +627,10 @@ export default function NegotiationWorkspacePage() {
     setBusy(true);
     setError('');
     try {
-      await api(`/commercial/opportunities/${oportunidadeId}/request-approval`, {
+      await api(isConverted
+        ? `/commercial/opportunities/${oportunidadeId}/revision-draft/request-approval`
+        : `/commercial/opportunities/${oportunidadeId}/request-approval`, {
         method: 'POST',
-        body: JSON.stringify({ reason }),
       });
       await load();
     } catch (reasonError) {
@@ -544,21 +641,22 @@ export default function NegotiationWorkspacePage() {
   }
 
   async function generatePrecheckout() {
+    if (isConverted) {
+      setError('Esta oportunidade já foi convertida. Use o histórico contratual para criar um aditivo, renovação ou substituição.');
+      return;
+    }
     setBusy(true);
     setError('');
     try {
-      // O link sempre deve congelar exatamente as condições que estão visíveis na negociação.
-      await persistNegotiation();
       const result = await api(`/commercial/opportunities/${oportunidadeId}/precheckout`, {
         method: 'POST',
       });
       const absolute = `${window.location.origin}${result.url}`;
       setCheckoutUrl(absolute);
-      await navigator.clipboard?.writeText(absolute).catch(() => undefined);
+      await navigator.clipboard.writeText(absolute);
       await load();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Falha ao gerar pré-checkout.');
-      await load().catch(() => undefined);
     } finally {
       setBusy(false);
     }
@@ -605,8 +703,6 @@ export default function NegotiationWorkspacePage() {
               </span>
             </div>
           </section>
-
-          <OpportunityWorkspaceNav opportunityId={oportunidadeId} />
 
           <section className="rounded-xl border border-edge bg-surface-elevated p-6">
             <h2 className="text-lg font-semibold">Responsabilidade comercial</h2>
@@ -691,6 +787,29 @@ export default function NegotiationWorkspacePage() {
               </div>
             )}
           </section>
+
+          {isConverted && (
+            <section className="grid gap-4 rounded-xl border border-brand/20 bg-brand/5 p-6 md:grid-cols-2">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wide text-ink-tertiary">Contrato atual · somente leitura</p>
+                <p className="mt-2 text-lg font-semibold">
+                  {currentTerms.cycle === 'YEARLY' ? 'Anual' : 'Mensal'} · {opportunity.customerType === 'PERSON'
+                    ? `${Number(currentTerms.participants?.dependentCount || 0)} dependente(s)`
+                    : `${Number(currentTerms.participants?.contractedLives || 0)} vida(s)`}
+                </p>
+                <p className="mt-1 text-sm text-ink-tertiary">{money(currentTerms.pricing?.finalAmount)} · condições vigentes preservadas no histórico.</p>
+              </div>
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wide text-brand">Nova condição proposta · rascunho</p>
+                <p className="mt-2 text-lg font-semibold">
+                  {form.cycle === 'YEARLY' ? 'Anual' : 'Mensal'} · {opportunity.customerType === 'PERSON'
+                    ? `${form.dependentCount} dependente(s)`
+                    : `${form.lives} vida(s)`}
+                </p>
+                <p className="mt-1 text-sm text-ink-tertiary">{money(projected.finalAmount)} · salve e recalcule antes de gerar o aditivo.</p>
+              </div>
+            </section>
+          )}
 
           <form onSubmit={save} className="rounded-xl border border-edge bg-surface-elevated p-6">
             <h2 className="text-lg font-semibold">Condições comerciais</h2>
@@ -839,7 +958,7 @@ export default function NegotiationWorkspacePage() {
                       className="mt-1 w-full rounded-lg border px-3 py-2"
                     />
                     <small className="mt-1 block text-xs text-ink-tertiary">
-                      A quantidade deve corresponder aos dependentes cadastrados na oportunidade; o pré-checkout não altera silenciosamente o valor negociado.
+                      Ao gerar o pré-checkout, o sistema sincroniza esta quantidade com os dependentes efetivamente cadastrados.
                       {priceTable ? ` Limite da tabela: ${priceTable.maxDependents}.` : ''}
                     </small>
                   </label>
@@ -934,7 +1053,7 @@ export default function NegotiationWorkspacePage() {
               disabled={busy || !form.allowedBillingTypes.length || !form.contractTemplateVersionId}
               className="mt-5 rounded-lg bg-brand px-4 py-2 text-white disabled:opacity-50"
             >
-              Salvar e recalcular
+              {isConverted ? 'Salvar rascunho e recalcular' : 'Salvar e recalcular'}
             </button>
           </form>
 
@@ -986,30 +1105,42 @@ export default function NegotiationWorkspacePage() {
             )}
           </section>
 
-          <section className="rounded-xl border border-edge bg-surface-elevated p-6">
-            <h2 className="text-lg font-semibold">Pré-checkout do cliente</h2>
-            <p className="mt-1 text-sm text-ink-tertiary">
-              O cliente confirma dados, participantes, contrato e segue para o checkout hospedado do Asaas.
-            </p>
-            <div className="mt-4 flex flex-wrap gap-2">
-              <button
-                onClick={generatePrecheckout}
-                disabled={busy || evaluation?.approvalRequired === true}
-                className="rounded-lg bg-brand px-4 py-2 text-sm text-white disabled:opacity-50"
-              >
-                Gerar e copiar link
-              </button>
-              <button onClick={revokePrecheckout} disabled={busy} className="rounded-lg border px-4 py-2 text-sm">
-                Revogar links ativos
-              </button>
-            </div>
-            {checkoutUrl && (
-              <div className="mt-4 flex gap-2">
-                <input readOnly value={checkoutUrl} className="min-w-0 flex-1 rounded-lg border px-3 py-2 text-sm" />
-                <a href={checkoutUrl} target="_blank" rel="noreferrer" className="rounded-lg border px-4 py-2 text-sm">Abrir</a>
+          {isConverted ? (
+            <section className="rounded-xl border border-brand/20 bg-brand/5 p-6">
+              <h2 className="text-lg font-semibold">Contratação inicial concluída</h2>
+              <p className="mt-1 text-sm text-ink-tertiary">
+                Esta oportunidade já possui uma assinatura. Para evitar uma segunda contratação, o link inicial de checkout está bloqueado.
+              </p>
+              <p className="mt-3 text-sm font-medium text-ink">
+                Consulte o histórico contratual abaixo ou crie um aditivo, renovação ou substituição para alterar a assinatura atual.
+              </p>
+            </section>
+          ) : (
+            <section className="rounded-xl border border-edge bg-surface-elevated p-6">
+              <h2 className="text-lg font-semibold">Pré-checkout da contratação inicial</h2>
+              <p className="mt-1 text-sm text-ink-tertiary">
+                O cliente confirma dados, participantes e contrato antes de seguir para o checkout hospedado do Asaas.
+              </p>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button
+                  onClick={generatePrecheckout}
+                  disabled={busy || evaluation?.approvalRequired === true}
+                  className="rounded-lg bg-brand px-4 py-2 text-sm text-white disabled:opacity-50"
+                >
+                  Gerar e copiar link da contratação inicial
+                </button>
+                <button onClick={revokePrecheckout} disabled={busy} className="rounded-lg border px-4 py-2 text-sm">
+                  Revogar links ativos
+                </button>
               </div>
-            )}
-          </section>
+              {checkoutUrl && (
+                <div className="mt-4 flex gap-2">
+                  <input readOnly value={checkoutUrl} className="min-w-0 flex-1 rounded-lg border px-3 py-2 text-sm" />
+                  <a href={checkoutUrl} target="_blank" rel="noreferrer" className="rounded-lg border px-4 py-2 text-sm">Abrir</a>
+                </div>
+              )}
+            </section>
+          )}
 
           <section className="rounded-xl border border-edge bg-surface-elevated p-6">
             <h2 className="text-lg font-semibold">Histórico contratual</h2>
@@ -1031,7 +1162,30 @@ export default function NegotiationWorkspacePage() {
               ))}
             </div>
 
-            {canApprove && latestAcceptedContract && (
+            {isConverted && revisionDraft?.pendingPrecheckout && (
+              <div className="mt-5 rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950">
+                <p className="font-semibold">Existe uma alteração contratual pendente</p>
+                <p className="mt-1 text-amber-900">
+                  Status: {revisionDraft.pendingPrecheckout.status}. Esta pendência pertence ao aditivo/renovação e não altera a assinatura atual.
+                  {revisionDraft.pendingPrecheckout.checkout?.status ? ` Checkout Asaas: ${revisionDraft.pendingPrecheckout.checkout.status}.` : ''}
+                </p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button type="button" onClick={reissueRevisionPrecheckout} disabled={busy} className="rounded-lg border border-amber-500 bg-white px-3 py-2 text-sm">
+                    Reemitir e copiar link da alteração
+                  </button>
+                  {revisionDraft.pendingPrecheckout.checkout?.url && (
+                    <a href={revisionDraft.pendingPrecheckout.checkout.url} target="_blank" rel="noreferrer" className="rounded-lg border border-amber-500 bg-white px-3 py-2 text-sm">
+                      Abrir pagamento no Asaas
+                    </a>
+                  )}
+                  <button type="button" onClick={revokeRevisionPrecheckout} disabled={busy} className="rounded-lg border border-red-300 bg-white px-3 py-2 text-sm text-red-700">
+                    Anular alteração pendente
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {canApprove && currentContract && (
               <form onSubmit={createRevision} className="mt-6 grid gap-3 md:grid-cols-2">
                 <label className="text-sm">
                   <span>Tipo de alteração</span>
@@ -1072,16 +1226,30 @@ export default function NegotiationWorkspacePage() {
                     className="mt-1 min-h-24 w-full rounded-lg border px-3 py-2"
                   />
                 </label>
-                <label className="flex items-center gap-2 text-sm md:col-span-2">
+                <label className="flex items-start gap-2 text-sm md:col-span-2">
                   <input
+                    className="mt-0.5"
                     type="checkbox"
                     checked={revision.requiresPayment}
                     onChange={event => setRevision({ ...revision, requiresPayment: event.target.checked })}
                   />
-                  Exigir novo checkout Asaas após o aceite
+                  <span>
+                    <strong>Criar nova assinatura via Checkout Asaas após o aceite</strong>
+                    <span className="mt-1 block text-xs text-ink-tertiary">
+                      Use somente quando a alteração exigir uma nova contratação. A assinatura atual permanece ativa e só será cancelada depois da confirmação financeira da nova assinatura.
+                    </span>
+                  </span>
                 </label>
-                <button disabled={busy} className="rounded-lg border px-4 py-2 text-sm md:col-span-2">
-                  Criar alteração e copiar link
+                <div className={`rounded-lg border p-3 text-sm md:col-span-2 ${revision.requiresPayment ? 'border-amber-200 bg-amber-50 text-amber-900' : 'border-green-200 bg-green-50 text-green-900'}`}>
+                  {revision.requiresPayment
+                    ? 'Com esta opção marcada, o aceite cria um novo Checkout e uma nova subscription no Asaas. A anterior não será cancelada antes de o pagamento da nova ser confirmado.'
+                    : 'Com esta opção desmarcada, o aceite atualiza a subscription já existente no Asaas, sem criar novo checkout nem nova subscription.'}
+                </div>
+                <p className="text-xs text-ink-tertiary md:col-span-2">
+                  Se a nova condição ultrapassar a política comercial, o sistema abrirá uma aprovação antes de permitir a emissão do contrato.
+                </p>
+                <button disabled={busy || (isConverted && (!revisionDraft?.draft || Boolean(revisionDraft?.pendingPrecheckout)))} className="rounded-lg border px-4 py-2 text-sm md:col-span-2">
+                  {revisionDraft?.pendingPrecheckout ? 'Resolva a alteração pendente acima' : 'Criar alteração e copiar link'}
                 </button>
               </form>
             )}

@@ -6,7 +6,12 @@ describe('subscription state machine', () => {
     expect(canTransitionSubscription(SubscriptionStatus.PENDING_PAYMENT, SubscriptionStatus.ACTIVE)).toBe(true);
   });
 
-  it('allows reactivation after cancellation', () => {
+  it('allows a pending subscription to become past due', () => {
+    expect(canTransitionSubscription(SubscriptionStatus.PENDING_PAYMENT, SubscriptionStatus.PAST_DUE)).toBe(true);
+  });
+
+  it('allows reactivation flow after cancellation', () => {
+    expect(canTransitionSubscription(SubscriptionStatus.CANCELLED, SubscriptionStatus.PENDING_PAYMENT)).toBe(true);
     expect(canTransitionSubscription(SubscriptionStatus.CANCELLED, SubscriptionStatus.ACTIVE)).toBe(true);
   });
 

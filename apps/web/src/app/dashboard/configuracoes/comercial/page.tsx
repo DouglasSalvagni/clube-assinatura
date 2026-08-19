@@ -1049,9 +1049,16 @@ export default function CommercialConfigurationPage() {
       <section id="aprovacoes" className="scroll-mt-24 rounded-xl border border-edge bg-surface-elevated p-6">
         <h2 className="text-lg font-semibold">Aprovações pendentes</h2>
         <div className="mt-4 space-y-3">
-          {approvals.filter((item) => item.status === 'PENDING').map((item) => (
+          {approvals.filter((item) => item.status === 'PENDING').map((item) => {
+            const revisionContext = (item.requestedConditions as any)?.revisionContext;
+            return (
             <article key={item.id} className="rounded-lg border p-4">
-              <p className="font-medium">Oportunidade {item.opportunityId}</p>
+              <p className="font-medium">
+                {revisionContext?.parentContractId ? 'Alteração contratual' : 'Negociação'} · Oportunidade {item.opportunityId}
+              </p>
+              {revisionContext?.parentContractId && (
+                <p className="mt-1 text-xs text-ink-tertiary">Contrato-base {revisionContext.parentContractId} · {revisionContext.relationType}</p>
+              )}
               <p className="mt-1 text-sm text-ink-tertiary">{item.reason}</p>
               {!!item.policyEvaluation?.violations?.length && (
                 <ul className="mt-2 list-disc pl-5 text-sm text-red-700">
@@ -1063,7 +1070,8 @@ export default function CommercialConfigurationPage() {
                 <button onClick={() => decide(item.id, 'REJECTED')} className="rounded-lg border px-3 py-2 text-sm">Rejeitar</button>
               </div>
             </article>
-          ))}
+            );
+          })}
           {!approvals.some((item) => item.status === 'PENDING') && <p className="text-sm text-ink-tertiary">Nenhuma aprovação pendente.</p>}
         </div>
       </section>

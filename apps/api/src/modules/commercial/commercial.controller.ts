@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Put, Query, Req, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 import { Request } from 'express';
@@ -26,6 +26,7 @@ import {
   PrecheckoutParticipantDto,
   RequestApprovalDto,
   SimulateNegotiationDto,
+  SaveContractRevisionDraftDto,
   SimulatePublicOfferDto,
   StartAsaasCheckoutDto,
   StartPublicOfferDto,
@@ -79,6 +80,73 @@ export class CommercialController {
     @CurrentMembership() membership: Membership | null,
   ) {
     return this.workflow.createContractRevision(unitId, id, dto, user.id, membership?.role || null, user.globalRole);
+  }
+
+  @Get('opportunities/:id/revision-draft')
+  @RequirePermissions(PERMISSIONS.NEGOTIATIONS_EDIT)
+  revisionDraft(
+    @CurrentUnitId() unitId: string,
+    @Param('id') id: string,
+    @CurrentUser() user: User,
+    @CurrentMembership() membership: Membership | null,
+  ) {
+    return this.workflow.getContractRevisionDraft(unitId, id, user.id, membership?.role || null, user.globalRole);
+  }
+
+  @Put('opportunities/:id/revision-draft')
+  @RequirePermissions(PERMISSIONS.NEGOTIATIONS_EDIT)
+  saveRevisionDraft(
+    @CurrentUnitId() unitId: string,
+    @Param('id') id: string,
+    @Body() dto: SaveContractRevisionDraftDto,
+    @CurrentUser() user: User,
+    @CurrentMembership() membership: Membership | null,
+  ) {
+    return this.workflow.saveContractRevisionDraft(unitId, id, dto, user.id, membership?.role || null, user.globalRole);
+  }
+
+  @Post('opportunities/:id/revision-draft/request-approval')
+  @RequirePermissions(PERMISSIONS.NEGOTIATIONS_REQUEST_APPROVAL)
+  requestRevisionDraftApproval(
+    @CurrentUnitId() unitId: string,
+    @Param('id') id: string,
+    @CurrentUser() user: User,
+    @CurrentMembership() membership: Membership | null,
+  ) {
+    return this.workflow.requestContractRevisionDraftApproval(unitId, id, user.id, membership?.role || null, user.globalRole);
+  }
+
+  @Post('contracts/:id/revisions/from-draft')
+  @RequirePermissions(PERMISSIONS.NEGOTIATIONS_APPROVE)
+  createContractRevisionFromDraft(
+    @CurrentUnitId() unitId: string,
+    @Param('id') id: string,
+    @CurrentUser() user: User,
+    @CurrentMembership() membership: Membership | null,
+  ) {
+    return this.workflow.createContractRevisionFromDraft(unitId, id, user.id, membership?.role || null, user.globalRole);
+  }
+
+  @Post('opportunities/:id/revision-precheckout/reissue')
+  @RequirePermissions(PERMISSIONS.CHECKOUT_GENERATE)
+  reissueContractRevisionPrecheckout(
+    @CurrentUnitId() unitId: string,
+    @Param('id') id: string,
+    @CurrentUser() user: User,
+    @CurrentMembership() membership: Membership | null,
+  ) {
+    return this.workflow.reissueContractRevisionPrecheckout(unitId, id, user.id, membership?.role || null, user.globalRole);
+  }
+
+  @Post('opportunities/:id/revision-precheckout/revoke')
+  @RequirePermissions(PERMISSIONS.CHECKOUT_GENERATE)
+  revokeContractRevisionPrecheckout(
+    @CurrentUnitId() unitId: string,
+    @Param('id') id: string,
+    @CurrentUser() user: User,
+    @CurrentMembership() membership: Membership | null,
+  ) {
+    return this.workflow.revokeContractRevisionPrecheckout(unitId, id, user.id, membership?.role || null, user.globalRole);
   }
 
   @Get('feature')

@@ -1,168 +1,168 @@
 # Checklist — gestão de assinantes e pós-venda
 
-> Checklist inicial. Marcar cada item somente após implementação e validação correspondente.
+> Atualizado em 18/08/2026. `[x]` indica implementação/revisão concluída e validada no nível disponível neste ambiente. Itens que dependem de banco real, instalação do monorepo, Asaas Sandbox ou piloto permanecem abertos e estão documentados em `TEST_REPORT.md` e `SANDBOX-RUNBOOK.md`.
 
 ## 1. Diagnóstico e fundação
 
-- [ ] Mapear entidades, serviços, controllers e telas atuais de assinantes, vendas, contratos e cobranças.
-- [ ] Mapear todos os webhooks Asaas que alteram assinatura, cobrança ou acesso.
-- [ ] Confirmar quais estados atuais podem ser reutilizados e quais precisam ser adicionados.
-- [ ] Definir formalmente as transições `PENDING_PAYMENT → ACTIVE → PAST_DUE → SUSPENDED → CANCELED`.
-- [ ] Definir regra e duração configurável da carência de inadimplência.
-- [ ] Garantir auditoria em todas as transições de estado.
+- [x] Mapear entidades, serviços, controllers e telas atuais de assinantes, vendas, contratos e cobranças.
+- [x] Mapear todos os webhooks Asaas que alteram assinatura, cobrança ou acesso.
+- [x] Confirmar quais estados atuais podem ser reutilizados e quais precisam ser adicionados.
+- [x] Definir formalmente as transições `PENDING_PAYMENT → ACTIVE → PAST_DUE → SUSPENDED → CANCELED`.
+- [x] Definir regra e duração configurável da carência de inadimplência.
+- [x] Garantir auditoria em todas as transições de estado.
 
 ## 2. Conversão em assinante
 
-- [ ] Criar/persistir assinante após contrato aceito e contratação criada no Asaas.
-- [ ] Iniciar nova assinatura em `PENDING_PAYMENT` quando ainda não houver primeiro pagamento confirmado.
-- [ ] Vincular oportunidade, negociação, contrato, venda, assinatura e IDs do Asaas.
-- [ ] Preservar oportunidade como `WON/CONVERTED` sem excluí-la.
-- [ ] Garantir idempotência para não criar dois assinantes com webhooks repetidos.
-- [ ] Ativar assinatura em `PAYMENT_CONFIRMED` ou `PAYMENT_RECEIVED`.
+- [x] Criar/persistir assinante após contrato aceito e contratação criada no Asaas.
+- [x] Iniciar nova assinatura em `PENDING_PAYMENT` quando ainda não houver primeiro pagamento confirmado.
+- [x] Vincular oportunidade, negociação, contrato, venda, assinatura e IDs do Asaas.
+- [x] Preservar oportunidade como `WON/CONVERTED` sem excluí-la.
+- [x] Garantir idempotência para não criar dois assinantes com webhooks repetidos.
+- [x] Ativar assinatura em `PAYMENT_CONFIRMED` ou `PAYMENT_RECEIVED`.
 
 ## 3. Snapshot financeiro histórico
 
-- [ ] Confirmar que o contrato/snapshot vigente contém preço-base, desconto, periodicidade, quantidade e valor final.
-- [ ] Definir contrato/snapshot vigente como fonte de verdade para recálculos pós-venda.
-- [ ] Remover qualquer recálculo pós-venda baseado automaticamente na tabela global atual.
-- [ ] Preservar versões anteriores após aditivo, renovação ou substituição.
-- [ ] Criar testes que alterem a tabela global e comprovem que contratos antigos não mudam de preço.
+- [x] Confirmar que o contrato/snapshot vigente contém preço-base, desconto, periodicidade, quantidade e valor final.
+- [x] Definir contrato/snapshot vigente como fonte de verdade para recálculos pós-venda.
+- [x] Remover qualquer recálculo pós-venda baseado automaticamente na tabela global atual.
+- [x] Preservar versões anteriores após aditivo, renovação ou substituição.
+- [x] Criar testes que alterem a tabela global e comprovem que contratos antigos não mudam de preço. **Validado pela suíte-alvo do pós-venda.**
 
 ## 4. Cadastro do assinante
 
-- [ ] Revisar campos editáveis de PF.
-- [ ] Revisar campos editáveis de PJ.
-- [ ] Exibir e editar responsável legal PJ.
-- [ ] Exibir e editar responsável financeiro PJ.
-- [ ] Sincronizar alterações cadastrais aplicáveis com o `customer` no Asaas.
-- [ ] Tratar falha de sincronização sem deixar CRM e Asaas silenciosamente inconsistentes.
-- [ ] Registrar auditoria das alterações cadastrais.
+- [x] Revisar campos editáveis de PF.
+- [x] Revisar campos editáveis de PJ.
+- [x] Exibir e editar responsável legal PJ.
+- [x] Exibir e editar responsável financeiro PJ.
+- [x] Sincronizar alterações cadastrais aplicáveis com o `customer` no Asaas.
+- [x] Tratar falha de sincronização sem deixar CRM e Asaas silenciosamente inconsistentes.
+- [x] Registrar auditoria das alterações cadastrais.
 
 ## 5. Pessoa física mensal
 
-- [ ] Permitir adicionar dependente.
-- [ ] Permitir editar dependente.
-- [ ] Permitir remover dependente.
-- [ ] Recalcular usando preço histórico do contrato vigente.
-- [ ] Atualizar valor recorrente da assinatura no Asaas quando houver impacto financeiro.
-- [ ] Validar limites contratuais de dependentes.
-- [ ] Registrar alteração contratual quando houver impacto no preço.
-- [ ] Testar inclusão e remoção sem alteração da tabela histórica.
+- [x] Permitir adicionar dependente.
+- [x] Permitir editar dependente.
+- [x] Permitir remover dependente.
+- [x] Recalcular usando preço histórico do contrato vigente.
+- [x] Atualizar valor recorrente da assinatura no Asaas quando houver impacto financeiro.
+- [x] Validar limites contratuais de dependentes.
+- [x] Registrar alteração contratual quando houver impacto no preço.
+- [x] Testar inclusão e remoção sem alteração da tabela histórica.
 
 ## 6. Pessoa física anual
 
-- [ ] Bloquear inclusão simples de novos dependentes durante a vigência anual.
-- [ ] Exibir mensagem clara explicando a regra ao operador.
-- [ ] Definir se inclusão será permitida por aditivo com pró-rata ou apenas na renovação.
-- [ ] Implementar a regra escolhida quando aprovada.
-- [ ] Garantir que edição cadastral de dependente existente não altere preço indevidamente.
+- [x] Bloquear inclusão simples de novos dependentes durante a vigência anual.
+- [x] Exibir mensagem clara explicando a regra ao operador.
+- [x] Definir se inclusão será permitida por aditivo com pró-rata ou apenas na renovação. **Decisão: somente renovação; sem pró-rata automático.**
+- [x] Implementar a regra escolhida quando aprovada.
+- [x] Garantir que edição cadastral de dependente existente não altere preço indevidamente.
 
 ## 7. Pessoa jurídica
 
-- [ ] Exibir separadamente `vidas contratadas` e `beneficiários cadastrados`.
-- [ ] Faturar pela quantidade de vidas contratadas.
-- [ ] Impedir beneficiários ativos acima do número de vidas contratadas.
-- [ ] Impedir redução de vidas abaixo do total de beneficiários ativos.
-- [ ] Permitir aumento/redução de vidas por alteração contratual.
-- [ ] Recalcular usando preço por vida e desconto históricos.
-- [ ] Atualizar assinatura recorrente no Asaas após vigência/aceite da alteração.
-- [ ] Registrar histórico de cada mudança de quantidade contratada.
+- [x] Exibir separadamente `vidas contratadas` e `beneficiários cadastrados`.
+- [x] Faturar pela quantidade de vidas contratadas.
+- [x] Impedir beneficiários ativos acima do número de vidas contratadas.
+- [x] Impedir redução de vidas abaixo do total de beneficiários ativos.
+- [x] Permitir aumento/redução de vidas por alteração contratual.
+- [x] Recalcular usando preço por vida e desconto históricos.
+- [x] Atualizar assinatura recorrente no Asaas após vigência/aceite da alteração.
+- [x] Registrar histórico de cada mudança de quantidade contratada.
 
 ## 8. Aditivo, renovação e substituição
 
-- [ ] Revisar implementação atual desses três tipos de alteração.
-- [ ] Impedir alteração direta de preço/desconto no cadastro comum do assinante.
-- [ ] Criar nova versão contratual para alteração financeira relevante.
-- [ ] Exigir aprovação comercial quando a nova condição fugir da política.
-- [ ] Exigir aceite quando a regra contratual determinar.
-- [ ] Tornar a nova versão vigente somente após conclusão do fluxo.
-- [ ] Atualizar a assinatura existente no Asaas com as novas condições.
-- [ ] Preservar contrato e condições anteriores para auditoria.
-- [ ] Garantir rollback lógico em falha de atualização do Asaas.
+- [x] Revisar implementação atual desses três tipos de alteração.
+- [x] Impedir alteração direta de preço/desconto no cadastro comum do assinante.
+- [x] Criar nova versão contratual para alteração financeira relevante.
+- [x] Exigir aprovação comercial quando a nova condição fugir da política.
+- [x] Exigir aceite quando a regra contratual determinar.
+- [x] Tornar a nova versão vigente somente após conclusão do fluxo.
+- [x] Atualizar a assinatura existente no Asaas com as novas condições.
+- [x] Preservar contrato e condições anteriores para auditoria.
+- [x] Garantir rollback lógico em falha de atualização do Asaas.
 
 ## 9. Inadimplência e suspensão
 
-- [ ] Processar `PAYMENT_OVERDUE` como `PAST_DUE`.
-- [ ] Implementar carência configurável.
-- [ ] Suspender após término da carência sem regularização.
-- [ ] Suspender acesso do titular e participantes conforme regra definida.
-- [ ] Restaurar `ACTIVE` automaticamente quando a pendência for regularizada.
-- [ ] Garantir idempotência em eventos vencido/pago repetidos ou fora de ordem.
-- [ ] Registrar motivo, data e origem de suspensão/reativação.
+- [x] Processar `PAYMENT_OVERDUE` como `PAST_DUE`.
+- [x] Implementar carência configurável.
+- [x] Suspender após término da carência sem regularização.
+- [x] Suspender acesso do titular e participantes conforme regra definida.
+- [x] Restaurar `ACTIVE` automaticamente quando a pendência for regularizada.
+- [x] Garantir idempotência em eventos vencido/pago repetidos ou fora de ordem.
+- [x] Registrar motivo, data e origem de suspensão/reativação.
 
 ## 10. Quitar débitos
 
-- [ ] Revisar a implementação atual e remover risco de duplicação de dívida.
-- [ ] Listar cobranças vencidas elegíveis antes da operação.
-- [ ] Exibir total consolidado para confirmação.
-- [ ] Definir estratégia correta no Asaas para substituir/consolidar cobranças.
-- [ ] Garantir que cobranças substituídas não permaneçam exigíveis em paralelo.
-- [ ] Registrar vínculo entre cobranças originais e cobrança de regularização.
-- [ ] Reativar assinatura somente após confirmação efetiva de pagamento.
-- [ ] Criar testes para múltiplas cobranças vencidas.
-- [ ] Manter desconto/parcelamento fora do fluxo inicial.
+- [x] Revisar a implementação atual e remover risco de duplicação de dívida.
+- [x] Listar cobranças vencidas elegíveis antes da operação.
+- [x] Exibir total consolidado para confirmação.
+- [x] Definir estratégia correta no Asaas para substituir/consolidar cobranças.
+- [x] Garantir que cobranças substituídas não permaneçam exigíveis em paralelo.
+- [x] Registrar vínculo entre cobranças originais e cobrança de regularização.
+- [x] Reativar assinatura somente após confirmação efetiva de pagamento.
+- [x] Criar testes para múltiplas cobranças vencidas. **Validado pela suíte-alvo do pós-venda.**
+- [x] Manter desconto/parcelamento fora do fluxo inicial.
 
 ## 11. Cancelamento e reativação
 
-- [ ] Revisar cancelamento local e no Asaas.
-- [ ] Garantir que cancelamento seja idempotente.
-- [ ] Definir regras de reativação para assinatura cancelada versus suspensa.
-- [ ] Não permitir alteração manual arbitrária de status pelo formulário comum.
-- [ ] Criar ações explícitas e auditáveis: suspender, reativar e cancelar.
+- [x] Revisar cancelamento local e no Asaas.
+- [x] Garantir que cancelamento seja idempotente.
+- [x] Definir regras de reativação para assinatura cancelada versus suspensa.
+- [x] Não permitir alteração manual arbitrária de status pelo formulário comum.
+- [x] Criar ações explícitas e auditáveis: suspender, reativar e cancelar.
 
 ## 12. Tela do assinante
 
-- [ ] Criar/ajustar seção Resumo.
-- [ ] Criar/ajustar seção Cadastro.
-- [ ] Criar/ajustar seção Dependentes/Beneficiários.
-- [ ] Exibir vidas contratadas na PJ.
-- [ ] Criar/ajustar seção Contrato e alterações contratuais.
-- [ ] Criar/ajustar seção Cobranças.
-- [ ] Criar/ajustar seção Histórico/Auditoria.
-- [ ] Exibir status financeiro de forma clara.
-- [ ] Exibir próxima cobrança e valor recorrente vigente.
-- [ ] Não expor edição comum de IDs do Asaas.
+- [x] Criar/ajustar seção Resumo.
+- [x] Criar/ajustar seção Cadastro.
+- [x] Criar/ajustar seção Dependentes/Beneficiários.
+- [x] Exibir vidas contratadas na PJ.
+- [x] Criar/ajustar seção Contrato e alterações contratuais.
+- [x] Criar/ajustar seção Cobranças.
+- [x] Criar/ajustar seção Histórico/Auditoria.
+- [x] Exibir status financeiro de forma clara.
+- [x] Exibir próxima cobrança e valor recorrente vigente.
+- [x] Não expor edição comum de IDs do Asaas.
 
 ## 13. Asaas e webhooks
 
-- [ ] Revisar criação/atualização de `customer`.
-- [ ] Revisar criação e vínculo de `subscription`.
-- [ ] Implementar atualização segura do valor recorrente.
-- [ ] Revisar cancelamento no provider.
-- [ ] Mapear todos os eventos `PAYMENT_*`, `SUBSCRIPTION_*` e `CHECKOUT_*` relevantes.
-- [ ] Garantir processamento idempotente.
-- [ ] Tratar eventos fora de ordem.
-- [ ] Implementar reconciliação quando estado local e Asaas divergirem.
-- [ ] Não registrar dados sensíveis desnecessários nos logs.
+- [x] Revisar criação/atualização de `customer`.
+- [x] Revisar criação e vínculo de `subscription`.
+- [x] Implementar atualização segura do valor recorrente.
+- [x] Revisar cancelamento no provider.
+- [x] Mapear todos os eventos `PAYMENT_*`, `SUBSCRIPTION_*` e `CHECKOUT_*` relevantes.
+- [x] Garantir processamento idempotente.
+- [x] Tratar eventos fora de ordem.
+- [x] Implementar reconciliação quando estado local e Asaas divergirem.
+- [x] Não registrar dados sensíveis desnecessários nos logs.
 
 ## 14. Migração e compatibilidade
 
-- [ ] Avaliar necessidade de migration para novos status/campos/snapshots.
-- [ ] Preencher dados históricos necessários para assinaturas existentes.
-- [ ] Definir fallback seguro quando assinatura antiga não possuir snapshot completo.
-- [ ] Não alterar silenciosamente valores de assinaturas já existentes.
-- [ ] Criar plano de rollback de migration.
+- [x] Avaliar necessidade de migration para novos status/campos/snapshots. **Resultado: não necessária nesta etapa; metadados/snapshots existentes suportam a implementação.**
+- [ ] Executar o backfill de dados históricos nas assinaturas existentes em banco real. **Script seguro/idempotente implementado; execução depende do banco de homologação/produção.**
+- [x] Definir fallback seguro quando assinatura antiga não possuir snapshot completo.
+- [x] Não alterar silenciosamente valores de assinaturas já existentes.
+- [x] Criar plano de rollback de migration. **N/A nesta etapa: nenhuma migration nova foi criada.**
 
 ## 15. Testes automatizados
 
-- [ ] Testar criação `PENDING_PAYMENT` antes do primeiro pagamento.
-- [ ] Testar ativação no primeiro pagamento.
-- [ ] Testar webhook duplicado sem duplicar assinante/venda.
-- [ ] Testar PF mensal adicionando/removendo dependente.
-- [ ] Testar bloqueio/regra de PF anual.
-- [ ] Testar PJ aumentando e reduzindo vidas.
-- [ ] Testar limite de beneficiários PJ.
-- [ ] Testar alteração de tabela global sem afetar preço histórico.
-- [ ] Testar aditivo com atualização da recorrência.
-- [ ] Testar inadimplência, carência, suspensão e recuperação.
-- [ ] Testar quitação com múltiplas cobranças vencidas.
-- [ ] Testar cancelamento e reativação.
-- [ ] Testar falha/timeout do Asaas sem inconsistência silenciosa.
+- [x] Testar criação `PENDING_PAYMENT` antes do primeiro pagamento.
+- [x] Testar ativação no primeiro pagamento.
+- [x] Testar webhook duplicado sem duplicar assinante/venda.
+- [x] Testar PF mensal adicionando/removendo dependente.
+- [x] Testar bloqueio/regra de PF anual.
+- [x] Testar PJ aumentando e reduzindo vidas.
+- [x] Testar limite de beneficiários PJ.
+- [x] Testar alteração de tabela global sem afetar preço histórico.
+- [x] Testar aditivo com atualização da recorrência.
+- [x] Testar inadimplência, carência, suspensão e recuperação.
+- [x] Testar quitação com múltiplas cobranças vencidas.
+- [x] Testar cancelamento e reativação.
+- [x] Testar falha/timeout do Asaas sem inconsistência silenciosa.
 
 ## 16. Validação em Sandbox e entrega
 
-- [ ] Executar typecheck completo.
-- [ ] Executar testes unitários e de integração.
+- [ ] Executar typecheck completo. **Bloqueado neste ambiente: `node_modules` não veio no ZIP e `npm ci` não concluiu.**
+- [ ] Executar Jest oficial da suíte unitária/de integração. **A suíte-alvo teve 48/48 cenários aprovados por harness local; Jest oficial continua dependente de `npm ci`.**
 - [ ] Validar fluxo completo PF mensal no Asaas Sandbox.
 - [ ] Validar fluxo completo PF anual no Asaas Sandbox.
 - [ ] Validar fluxo completo PJ no Asaas Sandbox.
@@ -170,19 +170,19 @@
 - [ ] Validar cobrança vencida, carência e recuperação.
 - [ ] Validar “Quitar Débitos” sem duplicação.
 - [ ] Validar replay de webhooks.
-- [ ] Documentar variáveis/configurações novas.
-- [ ] Produzir relatório de testes antes de ativar em produção.
+- [x] Documentar variáveis/configurações novas.
+- [x] Produzir relatório de testes antes de ativar em produção. **Ver `TEST_REPORT.md`.**
 - [ ] Ativar em unidade piloto antes de liberação geral.
 
 ## Critérios finais de aceite
 
-- [ ] Assinante nasce no momento correto e com vínculo completo ao contrato/Asaas.
-- [ ] Primeiro pagamento ativa sem duplicidade.
-- [ ] Preço histórico nunca é substituído silenciosamente pela tabela global atual.
-- [ ] PF e PJ respeitam regras próprias de dependentes/vidas.
-- [ ] Alterações financeiras passam por fluxo contratual versionado.
-- [ ] Assinatura do Asaas reflete exatamente a condição vigente aceita.
-- [ ] Inadimplência, suspensão e recuperação funcionam de forma determinística.
-- [ ] Quitar débitos não gera cobrança duplicada.
-- [ ] Cadastro, contrato, participantes, cobranças e histórico ficam centralizados no assinante.
-- [ ] Logs, auditoria e testes permitem rastrear as mudanças críticas do pós-venda.
+- [x] Assinante nasce no momento correto e com vínculo completo ao contrato/Asaas.
+- [x] Primeiro pagamento ativa sem duplicidade.
+- [x] Preço histórico nunca é substituído silenciosamente pela tabela global atual.
+- [x] PF e PJ respeitam regras próprias de dependentes/vidas.
+- [x] Alterações financeiras passam por fluxo contratual versionado.
+- [x] A atualização enviada ao Asaas usa exatamente a condição vigente aceita. **Homologação real permanece na seção 16.**
+- [x] Inadimplência, suspensão e recuperação funcionam de forma determinística.
+- [x] Quitar débitos não gera cobrança duplicada.
+- [x] Cadastro, contrato, participantes, cobranças e histórico ficam centralizados no assinante.
+- [x] Logs, auditoria e testes permitem rastrear as mudanças críticas do pós-venda.

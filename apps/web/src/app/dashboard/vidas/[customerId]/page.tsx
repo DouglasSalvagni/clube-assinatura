@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter, useParams } from 'next/navigation';
-import { CurrencyInput } from '@/components/masked-number-input';
 import { api } from '@/lib/api';
 import { usePageTitle } from '@/lib/page-title-context';
 import { useDialog } from '@/lib/dialog-context';
@@ -11,6 +10,7 @@ import { PageSkeleton, TableSkeleton } from '@/components/page-skeleton';
 
 const statusMeta: Record<string, { label: string; colors: string }> = {
   ACTIVE: { label: 'Ativo', colors: 'border-success/20 bg-success/10 text-success' },
+  PENDING: { label: 'Aguardando pagamento', colors: 'border-warning/20 bg-warning/10 text-warning' },
   DELINQUENT: { label: 'Inadimplente', colors: 'border-danger/20 bg-danger/10 text-danger' },
   INACTIVE: { label: 'Inativo', colors: 'border-ink-muted/20 bg-ink-muted/10 text-ink-tertiary' },
 };
@@ -57,6 +57,43 @@ interface Dependente {
   status: string;
 }
 
+interface SubscriptionSummary {
+  status: string;
+  financialStatus: string;
+  accessStatus: string;
+  customerType: 'PERSON' | 'COMPANY';
+  recurringAmount: number;
+  cycle: string | null;
+  billingType: string | null;
+  contractedLives: number | null;
+  contractedDependents: number | null;
+  registeredBeneficiaries: number | null;
+  activeDependents: number | null;
+  nextDueDate: string | null;
+  sourceOpportunityId: string | null;
+  contractId: string | null;
+  contractVersion: number | null;
+  contractRelationType: string | null;
+  pastDueSince: string | null;
+  suspensionDueAt: string | null;
+}
+
+interface ManagementInfo {
+  modernContract: boolean;
+  dependentChangesRequireContract: boolean;
+  annualDependentAdditionBlocked: boolean;
+  canManageBeneficiariesDirectly: boolean;
+  canAddDependentsDirectly: boolean;
+  dependentSlotsAvailable: number | null;
+  canCreateContractRevision: boolean;
+}
+
+interface DebtSummary {
+  count: number;
+  total: number;
+  suggestedDueDate: string;
+}
+
 interface Invoice {
   id: string;
   dueDate: string;
@@ -98,6 +135,14 @@ export default function VidaDetailPage() {
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [totalInvoices, setTotalInvoices] = useState(0);
   const [warning, setWarning] = useState<string | null>(null);
+  const [summary, setSummary] = useState<SubscriptionSummary | null>(null);
+  const [management, setManagement] = useState<ManagementInfo | null>(null);
+  const [contract, setContract] = useState<any>(null);
+  const [history, setHistory] = useState<any[]>([]);
+  const [companyContacts, setCompanyContacts] = useState<any>(null);
+  const [showCompanyContacts, setShowCompanyContacts] = useState(false);
+  const [companyContactForm, setCompanyContactForm] = useState({ legalRepresentativeName: '', legalRepresentativeTaxId: '', financialContactName: '', financialEmail: '', financialPhone: '' });
+  const [savingCompanyContacts, setSavingCompanyContacts] = useState(false);
   const [loadingInvoices, setLoadingInvoices] = useState(false);
 
   const [showForm, setShowForm] = useState(false);
@@ -107,14 +152,13 @@ export default function VidaDetailPage() {
   });
   const [showEditTitular, setShowEditTitular] = useState(false);
   const [titularForm, setTitularForm] = useState({
-    nome: '', email: '', telefone: '', endereco: '', enderecoNumero: '',
+    nome: '', cpfCnpj: '', email: '', telefone: '', endereco: '', enderecoNumero: '',
     complemento: '', bairro: '', cidade: '', estado: '', cep: '',
   });
   const [savingTitular, setSavingTitular] = useState(false);
   const [showPaymentModal, setShowPaymentModal] = useState(false);
-  const [paymentValue, setPaymentValue] = useState('0.00');
   const [paymentDueDate, setPaymentDueDate] = useState('');
-  const [paymentBillingType, setPaymentBillingType] = useState('BOLETO');
+  const [debtSummary, setDebtSummary] = useState<DebtSummary | null>(null);
   const [creatingPayment, setCreatingPayment] = useState(false);
   const [paymentResult, setPaymentResult] = useState<any>(null);
 
@@ -132,6 +176,11 @@ export default function VidaDetailPage() {
       const res = await api(`/vidas/${customerId}`);
       setTitular(res.titular || null);
       setDependentes(res.dependentes || []);
+      setSummary(res.summary || null);
+      setManagement(res.management || null);
+      setContract(res.contract || null);
+      setHistory(res.history || []);
+      setCompanyContacts(res.companyContacts || null);
       if (res.warning) setWarning(res.warning);
     } catch {
       setWarning('Erro ao carregar dados do plano');
@@ -195,6 +244,7 @@ export default function VidaDetailPage() {
     if (!titular) return;
     setTitularForm({
       nome: titular.nome,
+      cpfCnpj: titular.cpfCnpj || '',
       email: titular.email || '',
       telefone: titular.telefone || '',
       endereco: titular.endereco || '',
@@ -206,6 +256,38 @@ export default function VidaDetailPage() {
       cep: titular.cep || '',
     });
     setShowEditTitular(true);
+  }
+
+  function openCompanyContacts() {
+    setCompanyContactForm({
+      legalRepresentativeName: companyContacts?.legalRepresentative?.name || '',
+      legalRepresentativeTaxId: companyContacts?.legalRepresentative?.taxId || '',
+      financialContactName: companyContacts?.financialContact?.name || '',
+      financialEmail: companyContacts?.financialContact?.email || '',
+      financialPhone: companyContacts?.financialContact?.phone || '',
+    });
+    setShowCompanyContacts(true);
+  }
+
+  async function handleCompanyContacts(e: React.FormEvent) {
+    e.preventDefault();
+    setSavingCompanyContacts(true);
+    try {
+      await api(`/vidas/${customerId}/company-contacts`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          ...companyContactForm,
+          legalRepresentativeTaxId: stripMask(companyContactForm.legalRepresentativeTaxId),
+          financialPhone: stripMask(companyContactForm.financialPhone),
+        }),
+      });
+      setShowCompanyContacts(false);
+      await loadPlanDetails();
+    } catch (err: any) {
+      await alert(err.message);
+    } finally {
+      setSavingCompanyContacts(false);
+    }
   }
 
   async function handleEditTitular(e: React.FormEvent) {
@@ -228,8 +310,45 @@ export default function VidaDetailPage() {
   async function handleCancelPlan() {
     const ok = await confirm({ message: 'Tem certeza que deseja cancelar o plano deste titular?' });
     if (!ok) return;
+    const reason = window.prompt('Informe o motivo do cancelamento (mínimo 10 caracteres):')?.trim() || '';
+    if (reason.length < 10) {
+      await alert('Informe um motivo de cancelamento com pelo menos 10 caracteres.');
+      return;
+    }
     try {
-      await api(`/vidas/${customerId}/cancel`, { method: 'POST' });
+      await api(`/vidas/${customerId}/cancel`, { method: 'POST', body: JSON.stringify({ reason }) });
+      loadPlanDetails();
+    } catch (err: any) {
+      await alert(err.message);
+    }
+  }
+
+  async function openDebtSettlement() {
+    try {
+      const debt = await api(`/vidas/${customerId}/debts`);
+      if (!debt?.count) {
+        await alert('Não há cobranças vencidas elegíveis para regularização.');
+        return;
+      }
+      setDebtSummary(debt);
+      setPaymentDueDate(debt.suggestedDueDate || '');
+      setPaymentResult(null);
+      setShowPaymentModal(true);
+    } catch (err: any) {
+      await alert(err.message);
+    }
+  }
+
+  async function handleSuspendPlan() {
+    const ok = await confirm({ message: 'Suspender o acesso desta assinatura?' });
+    if (!ok) return;
+    const reason = window.prompt('Informe o motivo da suspensão (mínimo 10 caracteres):')?.trim() || '';
+    if (reason.length < 10) {
+      await alert('Informe um motivo de suspensão com pelo menos 10 caracteres.');
+      return;
+    }
+    try {
+      await api(`/vidas/${customerId}/suspend`, { method: 'POST', body: JSON.stringify({ reason }) });
       loadPlanDetails();
     } catch (err: any) {
       await alert(err.message);
@@ -240,7 +359,11 @@ export default function VidaDetailPage() {
     const ok = await confirm({ message: 'Reativar o plano deste titular?' });
     if (!ok) return;
     try {
-      await api(`/vidas/${customerId}/reactivate`, { method: 'POST' });
+      const result = await api(`/vidas/${customerId}/reactivate`, { method: 'POST' });
+      if (result?.paymentUrl) {
+        const popup = window.open(result.paymentUrl, '_blank', 'noopener,noreferrer');
+        if (!popup) await alert('A reativação foi iniciada e aguarda pagamento. Abra a cobrança pela seção de cobranças.');
+      }
       loadPlanDetails();
     } catch (err: any) {
       await alert(err.message);
@@ -289,22 +412,59 @@ export default function VidaDetailPage() {
       )}
 
       {titular && (
-        <div className="mb-8 flex items-center justify-end gap-3">
+        <div className="mb-8 flex flex-wrap items-center justify-end gap-3">
+          {management?.canCreateContractRevision && summary?.sourceOpportunityId && (
+            <button onClick={() => router.push(`/dashboard/oportunidades/${summary.sourceOpportunityId}/negociacao`)}
+              className="rounded-lg border border-brand/30 bg-brand/5 px-4 py-2 text-sm font-medium text-brand transition-colors hover:bg-brand/10">
+              Alterar contrato
+            </button>
+          )}
           <button onClick={openEditTitular}
             className="rounded-lg border border-edge px-4 py-2 text-sm font-medium text-ink-secondary transition-colors hover:bg-surface-canvas hover:text-ink">
             Editar Dados
           </button>
-          {titular.status === 'INACTIVE' || titular.status === 'DELINQUENT' ? (
+          {summary && ['ACTIVE', 'PAST_DUE'].includes(summary.status) && (
+            <button onClick={handleSuspendPlan}
+              className="rounded-lg border border-warning/30 bg-warning/5 px-4 py-2 text-sm font-medium text-warning transition-colors hover:bg-warning/10">
+              Suspender acesso
+            </button>
+          )}
+          {summary && ['CANCELLED', 'EXPIRED', 'SUSPENDED'].includes(summary.status) ? (
             <button onClick={handleReactivate}
               className="rounded-lg bg-success px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-success/80">
               Reativar Plano
             </button>
-          ) : (
+          ) : summary?.status !== 'CANCELLED' && (
             <button onClick={handleCancelPlan}
               className="rounded-lg bg-danger px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-danger/80">
               Cancelar Plano
             </button>
           )}
+        </div>
+      )}
+
+      {summary && (
+        <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="rounded-xl border border-edge bg-surface-elevated p-4 shadow-sm">
+            <p className="text-xs text-ink-tertiary">Situação</p>
+            <p className="mt-1 font-semibold text-ink">{summary.status === 'PENDING_PAYMENT' ? 'Aguardando pagamento' : summary.status === 'PAST_DUE' ? 'Em atraso' : summary.status === 'SUSPENDED' ? 'Suspensa' : summary.status === 'ACTIVE' ? 'Ativa' : summary.status}</p>
+            <p className="mt-1 text-xs text-ink-tertiary">Financeiro: {summary.financialStatus}</p>
+          </div>
+          <div className="rounded-xl border border-edge bg-surface-elevated p-4 shadow-sm">
+            <p className="text-xs text-ink-tertiary">Valor recorrente</p>
+            <p className="mt-1 font-semibold text-ink">{fmtBRL(Number(summary.recurringAmount || 0))}</p>
+            <p className="mt-1 text-xs text-ink-tertiary">{summary.cycle ? cycleLabels[summary.cycle] || summary.cycle : '-'}</p>
+          </div>
+          <div className="rounded-xl border border-edge bg-surface-elevated p-4 shadow-sm">
+            <p className="text-xs text-ink-tertiary">Próximo vencimento</p>
+            <p className="mt-1 font-semibold text-ink">{summary.nextDueDate ? formatDate(summary.nextDueDate) : '-'}</p>
+            <p className="mt-1 text-xs text-ink-tertiary">Acesso: {summary.accessStatus}</p>
+          </div>
+          <div className="rounded-xl border border-edge bg-surface-elevated p-4 shadow-sm">
+            <p className="text-xs text-ink-tertiary">{summary.customerType === 'COMPANY' ? 'Vidas' : 'Dependentes cadastrados'}</p>
+            <p className="mt-1 font-semibold text-ink">{summary.customerType === 'COMPANY' ? `${summary.registeredBeneficiaries || 0} / ${summary.contractedLives || 0}` : `${summary.activeDependents || 0} / ${summary.contractedDependents || 0}`}</p>
+            <p className="mt-1 text-xs text-ink-tertiary">{summary.customerType === 'COMPANY' ? 'Cadastrados / contratados' : 'Cadastrados / limite contratado'} · Contrato v{summary.contractVersion || '-'}</p>
+          </div>
         </div>
       )}
 
@@ -335,12 +495,37 @@ export default function VidaDetailPage() {
         )}
 
         <div>
-          <div className="mb-3 flex items-center justify-between">
-            <h3 className="text-sm font-medium text-ink-secondary">Dependentes</h3>
-            <button onClick={() => { resetForm(); setShowForm(true); }}
-              className="rounded-lg bg-brand px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-brand-dark">
-              + Adicionar Dependente
-            </button>
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-medium text-ink-secondary">{summary?.customerType === 'COMPANY' ? 'Beneficiários' : 'Dependentes'}</h3>
+              {summary?.customerType === 'PERSON' && (
+                <p className="mt-1 text-xs text-ink-tertiary">
+                  {summary.activeDependents || 0} cadastrado(s) de {summary.contractedDependents || 0} contratado(s)
+                  {management?.dependentSlotsAvailable != null && ` · ${management.dependentSlotsAvailable} vaga(s) disponível(is)`}.
+                </p>
+              )}
+            </div>
+            {management?.canManageBeneficiariesDirectly ? (
+              <button onClick={() => { resetForm(); setShowForm(true); }}
+                className="rounded-lg bg-brand px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-brand-dark">
+                + Adicionar Beneficiário
+              </button>
+            ) : management?.canAddDependentsDirectly ? (
+              <button onClick={() => { resetForm(); setShowForm(true); }}
+                className="rounded-lg bg-brand px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-brand-dark">
+                + Cadastrar dependente contratado
+              </button>
+            ) : management?.dependentChangesRequireContract && summary?.sourceOpportunityId ? (
+              <button onClick={() => router.push(`/dashboard/oportunidades/${summary.sourceOpportunityId}/negociacao`)}
+                className="rounded-lg border border-brand/30 bg-brand/5 px-3 py-1.5 text-xs font-medium text-brand transition-colors hover:bg-brand/10">
+                Ampliar dependentes no contrato
+              </button>
+            ) : (
+              <button onClick={() => { resetForm(); setShowForm(true); }}
+                className="rounded-lg bg-brand px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-brand-dark">
+                + Adicionar Dependente
+              </button>
+            )}
           </div>
 
           {dependentes.length === 0 && !showForm && (
@@ -380,10 +565,12 @@ export default function VidaDetailPage() {
                             className="rounded-md px-2 py-1 text-xs font-medium text-ink-secondary transition-colors hover:bg-surface-canvas hover:text-ink">
                             Editar
                           </button>
-                          <button onClick={() => handleDelete(d.id)}
-                            className="rounded-md px-2 py-1 text-xs font-medium text-danger transition-colors hover:bg-danger/10">
-                            Excluir
-                          </button>
+                          {(management?.canManageBeneficiariesDirectly || !management?.dependentChangesRequireContract) && (
+                            <button onClick={() => handleDelete(d.id)}
+                              className="rounded-md px-2 py-1 text-xs font-medium text-danger transition-colors hover:bg-danger/10">
+                              Excluir
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -398,7 +585,7 @@ export default function VidaDetailPage() {
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 backdrop-blur-[2px]">
               <div className="w-full max-w-lg rounded-xl border border-edge bg-surface-elevated p-6 shadow-xl">
                 <h3 className="mb-4 text-lg font-semibold text-ink">
-                  {editingId ? 'Editar Dependente' : 'Adicionar Dependente'}
+                  {editingId ? 'Editar Dependente' : 'Cadastrar dependente contratado'}
                 </h3>
                 <form onSubmit={handleSubmit} className="space-y-3">
                   <div>
@@ -428,6 +615,65 @@ export default function VidaDetailPage() {
         </div>
       </div>
 
+
+      {summary?.customerType === 'COMPANY' && (
+        <div className="mb-8 rounded-xl border border-edge bg-surface-elevated p-6 shadow-sm">
+          <div className="mb-4 flex items-center justify-between gap-3">
+            <h2 className="text-lg font-semibold text-ink">Responsáveis da empresa</h2>
+            <button onClick={openCompanyContacts}
+              className="rounded-lg border border-edge px-3 py-1.5 text-xs font-medium text-ink-secondary transition-colors hover:bg-surface-canvas hover:text-ink">
+              Editar responsáveis
+            </button>
+          </div>
+          <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
+            <div>
+              <p className="text-xs text-ink-tertiary">Responsável legal</p>
+              <p className="mt-1 text-sm font-medium text-ink">{companyContacts?.legalRepresentative?.name || '-'}</p>
+              <p className="text-xs text-ink-secondary">{companyContacts?.legalRepresentative?.taxId ? formatCpfCnpj(companyContacts.legalRepresentative.taxId) : '-'}</p>
+            </div>
+            <div>
+              <p className="text-xs text-ink-tertiary">Contato financeiro</p>
+              <p className="mt-1 text-sm font-medium text-ink">{companyContacts?.financialContact?.name || '-'}</p>
+              <p className="text-xs text-ink-secondary">{companyContacts?.financialContact?.email || '-'}</p>
+              <p className="text-xs text-ink-secondary">{companyContacts?.financialContact?.phone ? formatPhone(companyContacts.financialContact.phone) : '-'}</p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {(contract || history.length > 0) && (
+        <div className="mb-8 grid grid-cols-1 gap-4 lg:grid-cols-2">
+          {contract && (
+            <div className="rounded-xl border border-edge bg-surface-elevated p-6 shadow-sm">
+              <h2 className="mb-4 text-lg font-semibold text-ink">Contrato vigente</h2>
+              <div className="grid grid-cols-2 gap-3 text-sm">
+                <div><span className="text-xs text-ink-tertiary">Versão</span><p className="text-ink">v{contract.version}</p></div>
+                <div><span className="text-xs text-ink-tertiary">Tipo</span><p className="text-ink">{contract.relationType}</p></div>
+                <div><span className="text-xs text-ink-tertiary">Aceite</span><p className="text-ink">{contract.acceptedAt ? formatDate(contract.acceptedAt) : '-'}</p></div>
+                <div><span className="text-xs text-ink-tertiary">Status</span><p className="text-ink">{contract.status}</p></div>
+              </div>
+              {management?.canCreateContractRevision && summary?.sourceOpportunityId && (
+                <button onClick={() => router.push(`/dashboard/oportunidades/${summary.sourceOpportunityId}/negociacao`)}
+                  className="mt-4 text-sm font-medium text-brand hover:underline">Criar aditivo ou renovação</button>
+              )}
+            </div>
+          )}
+          {history.length > 0 && (
+            <div className="rounded-xl border border-edge bg-surface-elevated p-6 shadow-sm">
+              <h2 className="mb-4 text-lg font-semibold text-ink">Histórico recente</h2>
+              <div className="space-y-3">
+                {history.slice(0, 6).map((event) => (
+                  <div key={event.id} className="border-b border-edge/70 pb-2 last:border-0 last:pb-0">
+                    <p className="text-sm font-medium text-ink">{String(event.type || '').replaceAll('_', ' ')}</p>
+                    <p className="text-xs text-ink-tertiary">{formatDate(event.effectiveAt)}{event.fromStatus || event.toStatus ? ` · ${event.fromStatus || '-'} → ${event.toStatus || '-'}` : ''}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div className="rounded-xl border border-success/20 bg-success/5 p-5 shadow-sm">
           <p className="text-sm text-ink-tertiary">Total Recebido</p>
@@ -442,17 +688,10 @@ export default function VidaDetailPage() {
       <div className="rounded-xl border border-edge bg-surface-elevated p-6 shadow-sm">
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-lg font-semibold text-ink">Histórico de Faturas</h2>
-          {invoices.length > 0 && (
-            <button onClick={() => {
-              const devidas = invoices.filter((i) => i.status === 'PENDING' || i.status === 'OVERDUE');
-              setPaymentValue(devidas.reduce((a, i) => a + (i.value || 0), 0).toFixed(2));
-              setPaymentDueDate(new Date().toISOString().slice(0, 10));
-              setPaymentBillingType('BOLETO');
-              setPaymentResult(null);
-              setShowPaymentModal(true);
-            }}
+          {invoices.some((invoice) => invoice.status === 'OVERDUE') && (
+            <button onClick={openDebtSettlement}
               className="rounded-lg bg-brand px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-brand-dark">
-              Quitar Débitos
+              Regularizar débitos vencidos
             </button>
           )}
         </div>
@@ -539,23 +778,22 @@ export default function VidaDetailPage() {
         )}
       </div>
 
-      {showPaymentModal && (
+      {showPaymentModal && debtSummary && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 backdrop-blur-[2px]">
           <div className="w-full max-w-lg rounded-xl border border-edge bg-surface-elevated p-6 shadow-xl">
             {!paymentResult ? (
               <>
-                <h3 className="mb-4 text-lg font-semibold text-ink">Quitar Débitos</h3>
+                <h3 className="mb-2 text-lg font-semibold text-ink">Regularizar débitos vencidos</h3>
+                <p className="mb-4 text-sm text-ink-tertiary">
+                  Esta operação consolida {debtSummary.count} cobrança{debtSummary.count !== 1 ? 's' : ''} vencida{debtSummary.count !== 1 ? 's' : ''} em uma única cobrança. Não concede desconto nem cria dívida adicional.
+                </p>
                 <form onSubmit={async (e) => {
                   e.preventDefault();
                   setCreatingPayment(true);
                   try {
-                    const res = await api(`/vidas/${customerId}/create-payment`, {
+                    const res = await api(`/vidas/${customerId}/debts/settle`, {
                       method: 'POST',
-                      body: JSON.stringify({
-                        value: Number(paymentValue || 0),
-                        dueDate: paymentDueDate,
-                        billingType: paymentBillingType,
-                      }),
+                      body: JSON.stringify({ dueDate: paymentDueDate || undefined }),
                     });
                     setPaymentResult(res);
                   } catch (err: any) {
@@ -564,27 +802,15 @@ export default function VidaDetailPage() {
                     setCreatingPayment(false);
                   }
                 }} className="space-y-4">
-                  <div>
-                    <label className="mb-1 block text-xs font-medium text-ink-secondary">Valor</label>
-                    <CurrencyInput required
-                      className="w-full rounded-lg border border-edge bg-surface-input px-3 py-2 text-sm text-ink placeholder:text-ink-muted focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/20"
-                      value={paymentValue} onValueChange={setPaymentValue} placeholder="R$ 0,00" />
+                  <div className="rounded-lg border border-edge bg-surface-canvas/50 p-4">
+                    <span className="text-xs text-ink-tertiary">Saldo vencido consolidado</span>
+                    <p className="mt-1 text-xl font-semibold text-ink">{fmtBRL(debtSummary.total)}</p>
                   </div>
                   <div>
-                    <label className="mb-1 block text-xs font-medium text-ink-secondary">Data de Vencimento</label>
+                    <label className="mb-1 block text-xs font-medium text-ink-secondary">Novo vencimento</label>
                     <input type="date" required
-                      className="w-full rounded-lg border border-edge bg-surface-input px-3 py-2 text-sm text-ink placeholder:text-ink-muted focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/20"
+                      className="w-full rounded-lg border border-edge bg-surface-input px-3 py-2 text-sm text-ink focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/20"
                       value={paymentDueDate} onChange={(e) => setPaymentDueDate(e.target.value)} />
-                  </div>
-                  <div>
-                    <label className="mb-1 block text-xs font-medium text-ink-secondary">Forma de Pagamento</label>
-                    <select required
-                      className="w-full rounded-lg border border-edge bg-surface-input px-3 py-2 text-sm text-ink placeholder:text-ink-muted focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/20"
-                      value={paymentBillingType} onChange={(e) => setPaymentBillingType(e.target.value)}>
-                      <option value="BOLETO">Boleto</option>
-                      <option value="PIX">PIX</option>
-                      <option value="CREDIT_CARD">Cartão de Crédito</option>
-                    </select>
                   </div>
                   <div className="flex justify-end gap-2 pt-2">
                     <button type="button" onClick={() => setShowPaymentModal(false)}
@@ -593,72 +819,82 @@ export default function VidaDetailPage() {
                     </button>
                     <button type="submit" disabled={creatingPayment}
                       className="rounded-lg bg-brand px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-brand-dark disabled:opacity-60">
-                      {creatingPayment ? 'Criando...' : 'Criar Cobrança'}
+                      {creatingPayment ? 'Regularizando...' : 'Consolidar cobranças'}
                     </button>
                   </div>
                 </form>
               </>
             ) : (
               <>
-                <h3 className="mb-4 text-lg font-semibold text-ink">Cobrança Criada</h3>
+                <h3 className="mb-4 text-lg font-semibold text-ink">Débitos regularizados</h3>
                 <div className="space-y-3">
                   <div>
-                    <span className="text-xs text-ink-tertiary">Valor</span>
-                    <p className="text-sm text-ink font-medium">
-                      {(paymentResult.payment.value || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}
-                    </p>
+                    <span className="text-xs text-ink-tertiary">Valor consolidado</span>
+                    <p className="text-sm font-medium text-ink">{fmtBRL(Number(paymentResult.payment?.value || paymentResult.total || 0))}</p>
                   </div>
-                  {paymentResult.payment.invoiceUrl && (
+                  {paymentResult.payment?.invoiceUrl && (
                     <a href={paymentResult.payment.invoiceUrl} target="_blank" rel="noopener noreferrer"
-                      className="flex items-center gap-2 rounded-lg border border-edge px-4 py-3 text-sm text-ink-secondary transition-colors hover:bg-surface-canvas hover:text-brand">
-                      <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M2.036 12.322a1.012 1.012 0 0 1 0-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178Z" />
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
-                      </svg>
-                      Visualizar Fatura
+                      className="block rounded-lg border border-edge px-4 py-3 text-sm text-brand transition-colors hover:bg-surface-canvas">
+                      Abrir cobrança
                     </a>
                   )}
-                  {paymentResult.payment.bankSlipUrl && (
+                  {paymentResult.payment?.bankSlipUrl && (
                     <a href={paymentResult.payment.bankSlipUrl} target="_blank" rel="noopener noreferrer"
-                      className="flex items-center gap-2 rounded-lg border border-edge px-4 py-3 text-sm text-ink-secondary transition-colors hover:bg-surface-canvas hover:text-brand">
-                      <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 9.776c.112-.017.227-.026.344-.026h15.812c.117 0 .232.009.344.026m-16.5 0a2.25 2.25 0 0 0-1.883 2.542l.857 6a2.25 2.25 0 0 0 2.227 1.932H19.05a2.25 2.25 0 0 0 2.227-1.932l.857-6a2.25 2.25 0 0 0-1.883-2.542m-16.5 0V6A2.25 2.25 0 0 1 6 3.75h3.879a1.5 1.5 0 0 1 1.06.44l2.122 2.12a1.5 1.5 0 0 0 1.06.44H18A2.25 2.25 0 0 1 20.25 9v.776" />
-                      </svg>
-                      Baixar Boleto
+                      className="block rounded-lg border border-edge px-4 py-3 text-sm text-brand transition-colors hover:bg-surface-canvas">
+                      Abrir boleto
                     </a>
-                  )}
-                  {paymentResult.pixQrCode && (
-                    <>
-                      {paymentResult.pixQrCode.encodedImage && (
-                        <div className="flex justify-center">
-                          <img src={`data:image/png;base64,${paymentResult.pixQrCode.encodedImage}`} alt="PIX QR Code"
-                            className="h-40 w-40" />
-                        </div>
-                      )}
-                      {paymentResult.pixQrCode.payload && (
-                        <div>
-                          <label className="mb-1 block text-xs font-medium text-ink-secondary">Código PIX</label>
-                          <div className="flex gap-2">
-                            <input readOnly className="flex-1 rounded-lg border border-edge bg-surface-input px-3 py-2 text-xs text-ink"
-                              value={paymentResult.pixQrCode.payload} />
-                            <button onClick={() => navigator.clipboard.writeText(paymentResult.pixQrCode.payload)}
-                              className="rounded-lg border border-edge px-3 py-2 text-sm text-ink-secondary transition-colors hover:bg-surface-canvas">
-                              Copiar
-                            </button>
-                          </div>
-                        </div>
-                      )}
-                    </>
                   )}
                 </div>
                 <div className="mt-6 flex justify-end">
-                  <button onClick={() => { setShowPaymentModal(false); loadInvoices(); }}
+                  <button onClick={() => { setShowPaymentModal(false); setDebtSummary(null); loadInvoices(); loadPlanDetails(); }}
                     className="rounded-lg bg-brand px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-brand-dark">
                     Concluído
                   </button>
                 </div>
               </>
             )}
+          </div>
+        </div>
+      )}
+
+
+      {showCompanyContacts && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 backdrop-blur-[2px]">
+          <div className="w-full max-w-lg rounded-xl border border-edge bg-surface-elevated p-6 shadow-xl">
+            <h3 className="mb-4 text-lg font-semibold text-ink">Editar responsáveis da empresa</h3>
+            <form onSubmit={handleCompanyContacts} className="space-y-3">
+              <div>
+                <label className="mb-1 block text-xs font-medium text-ink-secondary">Responsável legal</label>
+                <input required className="w-full rounded-lg border border-edge bg-surface-input px-3 py-2 text-sm text-ink"
+                  value={companyContactForm.legalRepresentativeName} onChange={(e) => setCompanyContactForm({ ...companyContactForm, legalRepresentativeName: e.target.value })} />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-ink-secondary">CPF do responsável legal</label>
+                <input required className="w-full rounded-lg border border-edge bg-surface-input px-3 py-2 text-sm text-ink"
+                  value={maskCpfCnpj(companyContactForm.legalRepresentativeTaxId)} onChange={(e) => setCompanyContactForm({ ...companyContactForm, legalRepresentativeTaxId: stripMask(e.target.value) })} />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-ink-secondary">Contato financeiro</label>
+                <input required className="w-full rounded-lg border border-edge bg-surface-input px-3 py-2 text-sm text-ink"
+                  value={companyContactForm.financialContactName} onChange={(e) => setCompanyContactForm({ ...companyContactForm, financialContactName: e.target.value })} />
+              </div>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-ink-secondary">E-mail financeiro</label>
+                  <input type="email" required className="w-full rounded-lg border border-edge bg-surface-input px-3 py-2 text-sm text-ink"
+                    value={companyContactForm.financialEmail} onChange={(e) => setCompanyContactForm({ ...companyContactForm, financialEmail: e.target.value })} />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-ink-secondary">Telefone financeiro</label>
+                  <input required className="w-full rounded-lg border border-edge bg-surface-input px-3 py-2 text-sm text-ink"
+                    value={maskPhone(companyContactForm.financialPhone)} onChange={(e) => setCompanyContactForm({ ...companyContactForm, financialPhone: stripMask(e.target.value) })} />
+                </div>
+              </div>
+              <div className="flex justify-end gap-2 pt-2">
+                <button type="button" onClick={() => setShowCompanyContacts(false)} className="rounded-lg border border-edge px-4 py-2 text-sm text-ink-secondary">Cancelar</button>
+                <button type="submit" disabled={savingCompanyContacts} className="rounded-lg bg-brand px-4 py-2 text-sm font-medium text-white disabled:opacity-60">{savingCompanyContacts ? 'Salvando...' : 'Salvar'}</button>
+              </div>
+            </form>
           </div>
         </div>
       )}
@@ -674,6 +910,11 @@ export default function VidaDetailPage() {
                   <label className="mb-1 block text-xs font-medium text-ink-secondary">Nome</label>
                   <input required className="w-full rounded-lg border border-edge bg-surface-input px-3 py-2 text-sm text-ink placeholder:text-ink-muted focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/20"
                     value={titularForm.nome} onChange={(e) => setTitularForm({ ...titularForm, nome: e.target.value })} />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-ink-secondary">CPF/CNPJ</label>
+                  <input className="w-full rounded-lg border border-edge bg-surface-input px-3 py-2 text-sm text-ink placeholder:text-ink-muted focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/20"
+                    value={maskCpfCnpj(titularForm.cpfCnpj)} onChange={(e) => setTitularForm({ ...titularForm, cpfCnpj: stripMask(e.target.value) })} />
                 </div>
                 <div>
                   <label className="mb-1 block text-xs font-medium text-ink-secondary">Email</label>

@@ -3,20 +3,22 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { createHash, randomBytes } from 'crypto';
 import { In, Repository } from 'typeorm';
 import {
-  ApprovalRequest, ApprovalStatus, AuditLog, BillingCustomer, BillingCycle, BillingProviderName, BillingType, CheckoutSession,
+  AccessStatus, ApprovalRequest, ApprovalStatus, AuditLog, BillingCustomer, BillingCycle, BillingProviderName, BillingType, CheckoutSession,
   CheckoutStatus, CommercialOfferVersion, CommercialStatus, Contract, ContractAcceptance, ContractRelationType, ContractStatus,
-  ContractTemplate, ContractTemplateStatus, ContractTemplateVersion, CustomerType, GlobalRole, MemberRole, Membership, NegotiationPolicy, Opportunity,
-  OpportunityMember, OpportunityStatus, Person, PersonKind, PrecheckoutParticipant, PrecheckoutSession,
-  PrecheckoutStatus, Subscription, Team, TeamMember, UnitRole,
+  ContractTemplate, ContractTemplateStatus, ContractTemplateVersion, CustomerType, FinancialStatus, GlobalRole, LifecycleSource, MemberRole, Membership, NegotiationPolicy, Opportunity,
+  OpportunityMember, OpportunityStatus, Person, PersonKind, PrecheckoutParticipant, PrecheckoutSession, Sale,
+  PrecheckoutStatus, Subscription, SubscriptionMember, SubscriptionMemberStatus, SubscriptionStatus, Team, TeamMember, UnitRole,
 } from '../../database/entities';
 import { isValidCnpj, isValidCpf, isValidTaxId, normalizeTaxId } from '../../common/utils/tax-id';
 import { PricingService } from './pricing.service';
 import { evaluateNegotiationPolicies } from './policy-evaluator';
 import { CommercialFeatureService } from './commercial-feature.service';
-import { AsaasClient } from '../billing/asaas.client';
+import { AsaasApiException, AsaasClient } from '../billing/asaas.client';
+import { BillingService } from '../billing/billing.service';
+import { LifecycleService } from '../lifecycle/lifecycle.service';
 import {
   AcceptContractDto, CreateContractRevisionDto, CreatePolicyDto, DecideApprovalDto, PrecheckoutParticipantDto,
-  RequestApprovalDto, StartAsaasCheckoutDto, UpdatePrecheckoutCustomerDto,
+  RequestApprovalDto, SaveContractRevisionDraftDto, StartAsaasCheckoutDto, UpdatePrecheckoutCustomerDto,
 } from './commercial.dto';
 
 @Injectable()
@@ -41,8 +43,12 @@ export class CommercialWorkflowService {
     @InjectRepository(BillingCustomer) private readonly billingCustomers: Repository<BillingCustomer>,
     @InjectRepository(CheckoutSession) private readonly checkoutSessions: Repository<CheckoutSession>,
     @InjectRepository(Subscription) private readonly subscriptions: Repository<Subscription>,
+    @InjectRepository(SubscriptionMember) private readonly subscriptionMembers: Repository<SubscriptionMember>,
+    @InjectRepository(Sale) private readonly sales: Repository<Sale>,
     private readonly pricing: PricingService,
     private readonly asaas: AsaasClient,
+    private readonly billing: BillingService,
+    private readonly lifecycle: LifecycleService,
     private readonly feature: CommercialFeatureService,
   ) {}
 
@@ -283,17 +289,31 @@ export class CommercialWorkflowService {
     if (!approval) throw new NotFoundException('Solicitação não encontrada.');
     if (approval.status !== ApprovalStatus.PENDING) throw new ConflictException('Solicitação já decidida.');
     const opportunity = await this.opportunities.findOneByOrFail({ unitId, id: approval.opportunityId });
-    if (dto.decision === 'APPROVED'
-      && this.canonical(this.approvalTerms(opportunity.negotiationSnapshot || {})) !== this.canonical(this.approvalTerms(approval.requestedConditions || {}))) {
-      throw new ConflictException('As condições da negociação mudaram após a solicitação. Gere uma nova aprovação.');
+    const revisionContext = approval.requestedConditions?.revisionContext || null;
+    if (dto.decision === 'APPROVED') {
+      if (revisionContext?.parentContractId) {
+        const parent = await this.contracts.findOne({
+          where: { unitId, id: revisionContext.parentContractId },
+        });
+        if (!parent || parent.status !== ContractStatus.ACCEPTED || parent.contentHash !== revisionContext.parentContentHash) {
+          throw new ConflictException('O contrato de origem mudou após a solicitação. Gere uma nova aprovação para a alteração contratual.');
+        }
+      } else if (this.canonical(this.approvalTerms(opportunity.negotiationSnapshot || {})) !== this.canonical(this.approvalTerms(approval.requestedConditions || {}))) {
+        throw new ConflictException('As condições da negociação mudaram após a solicitação. Gere uma nova aprovação.');
+      }
     }
     approval.status = dto.decision === 'APPROVED' ? ApprovalStatus.APPROVED : ApprovalStatus.REJECTED;
     approval.decidedBy = userId; approval.decisionNotes = dto.notes || null; approval.decidedAt = new Date();
-    opportunity.commercialStatus = approval.status === ApprovalStatus.APPROVED ? CommercialStatus.APPROVED : CommercialStatus.NEGOTIATION;
-    await this.opportunities.save(opportunity);
+    if (!revisionContext) {
+      opportunity.commercialStatus = approval.status === ApprovalStatus.APPROVED ? CommercialStatus.APPROVED : CommercialStatus.NEGOTIATION;
+      await this.opportunities.save(opportunity);
+    }
     const saved = await this.approvals.save(approval);
-    await this.audit(unitId, userId, 'negotiation.approval_decided', 'approval_request', approval.id, null, {
-      opportunityId: approval.opportunityId, decision: approval.status, notes: approval.decisionNotes,
+    await this.audit(unitId, userId, revisionContext ? 'contract_revision.approval_decided' : 'negotiation.approval_decided', 'approval_request', approval.id, null, {
+      opportunityId: approval.opportunityId,
+      parentContractId: revisionContext?.parentContractId || null,
+      decision: approval.status,
+      notes: approval.decisionNotes,
     });
     return saved;
   }
@@ -313,6 +333,508 @@ export class CommercialWorkflowService {
       where: { unitId, opportunityId },
       order: { version: 'DESC' },
     });
+  }
+
+  async getContractRevisionDraft(
+    unitId: string,
+    opportunityId: string,
+    userId: string,
+    role: UnitRole | null,
+    globalRole: GlobalRole,
+  ) {
+    const context = await this.revisionDraftContext(unitId, opportunityId, userId, role, globalRole);
+    const pendingPrecheckout = await this.revisionPendingPrecheckout(unitId, opportunityId);
+    if (!context.draft) {
+      return {
+        currentContract: context.parent,
+        draft: null,
+        policyEvaluation: null,
+        pendingPrecheckout: this.pendingPrecheckoutSummary(pendingPrecheckout),
+      };
+    }
+    const subject = await this.policySubject(context.opportunity, userId, role);
+    const evaluation = await this.evaluate(
+      unitId, subject.userId, subject.role, context.draft.snapshot?.negotiation || {},
+      context.opportunity.customerType, context.opportunity.teamId,
+    );
+    const approval = await this.currentRevisionApproval(
+      unitId, opportunityId, context.draft.snapshot?.negotiation || {}, context.parent.id,
+      context.parent.contentHash, context.draft.relationType,
+    );
+    return {
+      currentContract: context.parent,
+      draft: context.draft,
+      policyEvaluation: { ...evaluation, approval, approvalRequired: !evaluation.allowed },
+      pendingPrecheckout: this.pendingPrecheckoutSummary(pendingPrecheckout),
+    };
+  }
+
+  async reissueContractRevisionPrecheckout(
+    unitId: string,
+    opportunityId: string,
+    userId: string,
+    role: UnitRole | null,
+    globalRole: GlobalRole,
+  ) {
+    await this.assertRevisionOpportunityAccess(unitId, opportunityId, userId, role, globalRole);
+    const pending = await this.revisionPendingPrecheckout(unitId, opportunityId);
+    if (!pending) throw new NotFoundException('Não existe uma alteração contratual pendente para reemitir o link.');
+
+    const token = randomBytes(32).toString('hex');
+    pending.session.tokenHash = this.hash(token);
+    if (pending.session.expiresAt <= new Date()) {
+      pending.session.expiresAt = new Date(Date.now() + 7 * 86400000);
+    }
+    await this.sessions.save(pending.session);
+    await this.audit(unitId, userId, 'contract_revision.precheckout_reissued', 'precheckout_session', pending.session.id, null, {
+      opportunityId,
+      contractId: pending.contract.id,
+      previousStatus: pending.session.status,
+    });
+    return {
+      precheckout: {
+        id: pending.session.id,
+        status: pending.session.status,
+        expiresAt: pending.session.expiresAt,
+        url: `/checkout/${token}`,
+      },
+      checkout: pending.checkout ? {
+        id: pending.checkout.id,
+        status: pending.checkout.status,
+        url: pending.checkout.url,
+        expiresAt: pending.checkout.expiresAt,
+      } : null,
+    };
+  }
+
+  async revokeContractRevisionPrecheckout(
+    unitId: string,
+    opportunityId: string,
+    userId: string,
+    role: UnitRole | null,
+    globalRole: GlobalRole,
+  ) {
+    await this.assertRevisionOpportunityAccess(unitId, opportunityId, userId, role, globalRole);
+    const pending = await this.revisionPendingPrecheckout(unitId, opportunityId);
+    if (!pending) throw new NotFoundException('Não existe uma alteração contratual pendente para anular.');
+    if (pending.checkout?.status === CheckoutStatus.PAID) {
+      throw new ConflictException('O pagamento desta alteração já foi confirmado e ela não pode ser anulada por esta tela.');
+    }
+
+    await this.cancelPendingAsaasResource(unitId, pending.checkout);
+    if (pending.checkout) {
+      pending.checkout.status = CheckoutStatus.CANCELLED;
+      await this.checkoutSessions.save(pending.checkout);
+    }
+    pending.session.status = PrecheckoutStatus.REVOKED;
+    pending.session.revokedAt = new Date();
+    await this.sessions.save(pending.session);
+    pending.contract.status = ContractStatus.VOID;
+    await this.contracts.save(pending.contract);
+    await this.audit(unitId, userId, 'contract_revision.precheckout_revoked', 'precheckout_session', pending.session.id, null, {
+      opportunityId,
+      contractId: pending.contract.id,
+      checkoutSessionId: pending.checkout?.id || null,
+      checkoutExternalId: pending.checkout?.externalId || null,
+    });
+    return { revoked: true, contractId: pending.contract.id, precheckoutSessionId: pending.session.id };
+  }
+
+  async saveContractRevisionDraft(
+    unitId: string,
+    opportunityId: string,
+    dto: SaveContractRevisionDraftDto,
+    userId: string,
+    role: UnitRole | null,
+    globalRole: GlobalRole,
+  ) {
+    await this.feature.assertEnabled(unitId);
+    const context = await this.revisionDraftContext(unitId, opportunityId, userId, role, globalRole);
+    if (context.opportunity.status !== OpportunityStatus.WON) {
+      throw new BadRequestException('Rascunhos pós-venda só podem ser criados para oportunidades já convertidas.');
+    }
+    const pendingRevision = context.children.find((item) => item.status === ContractStatus.READY);
+    if (pendingRevision) throw new ConflictException('Já existe uma alteração contratual aguardando aceite.');
+
+    const relationType = dto.relationType || context.draft?.relationType || ContractRelationType.AMENDMENT;
+    const proposal = await this.calculateRevisionDraftProposal(
+      context.parent, context.opportunity, { ...dto, relationType }, userId, role,
+    );
+    const templateVersionId = dto.contractTemplateVersionId
+      || context.draft?.templateVersionId
+      || context.parent.templateVersionId;
+    if (templateVersionId && !await this.templateVersions.findOne({ where: { unitId, id: templateVersionId } })) {
+      throw new BadRequestException('A versão de modelo contratual selecionada não foi encontrada.');
+    }
+    const revisionData = {
+      relationType,
+      reason: dto.reason?.trim() || context.draft?.changeReason || '',
+      changes: dto.changes || {},
+      effectiveAt: proposal.effectiveAt,
+      updatedAt: new Date().toISOString(),
+      updatedBy: userId,
+      parentContractId: context.parent.id,
+      parentContentHash: context.parent.contentHash,
+    };
+    const snapshot = {
+      ...context.parent.snapshot,
+      negotiation: { ...proposal.negotiation, contractTemplateVersionId: templateVersionId || null },
+      revision: revisionData,
+    };
+    const content = this.renderRevision(context.parent, revisionData, snapshot.negotiation);
+    const draft = context.draft || this.contracts.create({
+      unitId,
+      opportunityId,
+      parentContractId: context.parent.id,
+      relationType,
+      changeReason: revisionData.reason || null,
+      requiresPayment: proposal.requiresPayment,
+      version: 0,
+      status: ContractStatus.DRAFT,
+      templateCode: context.parent.templateCode,
+      templateVersionId: templateVersionId || null,
+      snapshot,
+      renderedContent: content,
+      contentHash: this.hash(content),
+      acceptedAt: null,
+    });
+    if (context.draft) {
+      Object.assign(draft, {
+        relationType,
+        changeReason: revisionData.reason || null,
+        requiresPayment: proposal.requiresPayment,
+        templateCode: context.parent.templateCode,
+        templateVersionId: templateVersionId || null,
+        snapshot,
+        renderedContent: content,
+        contentHash: this.hash(content),
+        acceptedAt: null,
+      });
+    }
+    const savedDraft = await this.contracts.save(draft);
+    const approval = await this.currentRevisionApproval(
+      unitId, opportunityId, snapshot.negotiation, context.parent.id, context.parent.contentHash, relationType,
+    );
+    await this.audit(unitId, userId, 'contract_revision.draft_saved', 'contract', savedDraft.id, null, {
+      opportunityId,
+      parentContractId: context.parent.id,
+      relationType,
+      requiresPayment: proposal.requiresPayment,
+    });
+    return {
+      currentContract: context.parent,
+      draft: savedDraft,
+      policyEvaluation: { ...proposal.policyEvaluation, approval, approvalRequired: !proposal.policyEvaluation.allowed },
+    };
+  }
+
+  async createContractRevisionFromDraft(
+    unitId: string,
+    contractId: string,
+    userId: string,
+    role: UnitRole | null,
+    globalRole: GlobalRole,
+  ) {
+    await this.feature.assertEnabled(unitId);
+    const parent = await this.contracts.findOne({ where: { unitId, id: contractId } });
+    if (!parent || parent.status !== ContractStatus.ACCEPTED) {
+      throw new BadRequestException('O contrato vigente não está disponível para gerar uma alteração.');
+    }
+    const previousPending = await this.revisionPendingPrecheckout(unitId, parent.opportunityId);
+    if (previousPending) {
+      throw new ConflictException('Existe uma contratação aguardando pagamento. Reenvie ou anule o link pendente antes de criar outra alteração.');
+    }
+    const context = await this.revisionDraftContext(unitId, parent.opportunityId, userId, role, globalRole);
+    if (context.parent.id !== parent.id || !context.draft) {
+      throw new NotFoundException('Nenhum rascunho de alteração contratual foi encontrado para este contrato vigente.');
+    }
+    const draft = context.draft;
+    const reason = String(draft.snapshot?.revision?.reason || draft.changeReason || '').trim();
+    if (reason.length < 5) throw new BadRequestException('Informe um motivo com pelo menos 5 caracteres antes de gerar o aditivo.');
+    if (context.children.some((item) => item.id !== draft.id && item.status === ContractStatus.READY)) {
+      throw new ConflictException('Já existe uma alteração contratual aguardando aceite.');
+    }
+
+    const negotiation = draft.snapshot?.negotiation || {};
+    const subject = await this.policySubject(context.opportunity, userId, role);
+    const policyEvaluation = await this.evaluate(
+      unitId, subject.userId, subject.role, negotiation, context.opportunity.customerType, context.opportunity.teamId,
+    );
+    if (!policyEvaluation.allowed) {
+      const approval = await this.currentRevisionApproval(
+        unitId, context.opportunity.id, negotiation, parent.id, parent.contentHash, draft.relationType,
+      );
+      if (approval?.status !== ApprovalStatus.APPROVED) {
+        throw new BadRequestException({
+          message: 'O rascunho de alteração contratual exige aprovação antes da emissão do aditivo.',
+          approvalRequired: true,
+          approvalRequestId: approval?.id || null,
+          approvalStatus: approval?.status || null,
+          violations: policyEvaluation.violations,
+        });
+      }
+    }
+
+    const revisionData = {
+      ...(draft.snapshot?.revision || {}),
+      relationType: draft.relationType,
+      reason,
+      createdAt: new Date().toISOString(),
+      createdBy: userId,
+      parentContractId: parent.id,
+      parentContentHash: parent.contentHash,
+    };
+    const snapshot = { ...draft.snapshot, revision: revisionData, negotiation };
+    const content = this.renderRevision(parent, revisionData, negotiation);
+    const allContracts = await this.contracts.find({ where: { unitId, opportunityId: parent.opportunityId } });
+    const nextVersion = Math.max(
+      parent.version,
+      ...allContracts.filter((item) => item.id !== draft.id).map((item) => item.version || 0),
+    ) + 1;
+    Object.assign(draft, {
+      relationType: draft.relationType,
+      changeReason: reason,
+      requiresPayment: draft.requiresPayment,
+      version: nextVersion,
+      status: ContractStatus.READY,
+      templateCode: parent.templateCode,
+      snapshot,
+      renderedContent: content,
+      contentHash: this.hash(content),
+      acceptedAt: null,
+    });
+    const revision = await this.contracts.save(draft);
+
+    const token = randomBytes(32).toString('hex');
+    const session = await this.sessions.save(this.sessions.create({
+      unitId,
+      opportunityId: parent.opportunityId,
+      contractId: revision.id,
+      checkoutSessionId: null,
+      tokenHash: this.hash(token),
+      status: PrecheckoutStatus.CONTRACT_READY,
+      expiresAt: new Date(Date.now() + 7 * 86400000),
+      revokedAt: null,
+      customerData: parent.snapshot?.customer || {},
+      pricingSnapshot: negotiation,
+    }));
+    for (const participant of Array.isArray(parent.snapshot?.participants) ? parent.snapshot.participants : []) {
+      if (!participant?.name || !participant?.taxId) continue;
+      await this.participants.save(this.participants.create({
+        unitId, precheckoutSessionId: session.id, role: participant.role || MemberRole.DEPENDENT,
+        name: participant.name, taxId: normalizeTaxId(participant.taxId), birthDate: participant.birthDate || null,
+        relationship: participant.relationship || null,
+      }));
+    }
+    await this.audit(unitId, userId, 'contract.revision_created', 'contract', revision.id, null, {
+      opportunityId: parent.opportunityId, parentContractId: parent.id, relationType: revision.relationType,
+      requiresPayment: revision.requiresPayment, contentHash: revision.contentHash, source: 'POST_SALE_DRAFT',
+    });
+    return {
+      contract: revision,
+      precheckout: { id: session.id, token, expiresAt: session.expiresAt, url: `/checkout/${token}` },
+      policyEvaluation,
+    };
+  }
+
+  async requestContractRevisionDraftApproval(
+    unitId: string,
+    opportunityId: string,
+    userId: string,
+    role: UnitRole | null,
+    globalRole: GlobalRole,
+  ) {
+    const context = await this.revisionDraftContext(unitId, opportunityId, userId, role, globalRole);
+    if (!context.draft) throw new NotFoundException('Salve um rascunho de alteração contratual antes de solicitar aprovação.');
+    const subject = await this.policySubject(context.opportunity, userId, role);
+    const negotiation = context.draft.snapshot?.negotiation || {};
+    const policyEvaluation = await this.evaluate(
+      unitId, subject.userId, subject.role, negotiation, context.opportunity.customerType, context.opportunity.teamId,
+    );
+    if (policyEvaluation.allowed) throw new BadRequestException('O rascunho está dentro da política comercial e não exige aprovação.');
+    const current = await this.currentRevisionApproval(
+      unitId, opportunityId, negotiation, context.parent.id, context.parent.contentHash, context.draft.relationType,
+    );
+    if (current?.status === ApprovalStatus.APPROVED || current?.status === ApprovalStatus.PENDING) return current;
+    const approval = await this.approvals.save(this.approvals.create({
+      unitId,
+      opportunityId,
+      requestedBy: userId,
+      decidedBy: null,
+      status: ApprovalStatus.PENDING,
+      reason: `Alteração contratual: ${context.draft.changeReason || 'Rascunho pós-venda'}`,
+      requestedConditions: {
+        ...negotiation,
+        revisionContext: {
+          parentContractId: context.parent.id,
+          parentContentHash: context.parent.contentHash,
+          relationType: context.draft.relationType,
+        },
+      },
+      policyEvaluation,
+      decisionNotes: null,
+      decidedAt: null,
+    }));
+    await this.audit(unitId, userId, 'contract_revision.approval_requested', 'approval_request', approval.id, null, {
+      opportunityId,
+      parentContractId: context.parent.id,
+      relationType: context.draft.relationType,
+      violations: policyEvaluation.violations,
+      source: 'POST_SALE_DRAFT',
+    });
+    return approval;
+  }
+
+  private async revisionPendingPrecheckout(unitId: string, opportunityId: string) {
+    const [sessions, contracts] = await Promise.all([
+      this.sessions.find({ where: { unitId, opportunityId } }),
+      this.contracts.find({ where: { unitId, opportunityId } }),
+    ]);
+    const revisionsById = new Map(
+      contracts.filter((contract) => Boolean(contract.parentContractId)).map((contract) => [contract.id, contract]),
+    );
+    const session = sessions
+      .filter((item) => item.contractId && revisionsById.has(item.contractId)
+        && [PrecheckoutStatus.CONTRACT_READY, PrecheckoutStatus.ACCEPTED, PrecheckoutStatus.PAYMENT_PENDING].includes(item.status))
+      .sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())[0];
+    if (!session || !session.contractId) return null;
+    const checkout = session.checkoutSessionId
+      ? await this.checkoutSessions.findOne({ where: { unitId, id: session.checkoutSessionId } })
+      : null;
+    return { session, contract: revisionsById.get(session.contractId)!, checkout };
+  }
+
+  private async assertRevisionOpportunityAccess(
+    unitId: string,
+    opportunityId: string,
+    userId: string,
+    role: UnitRole | null,
+    globalRole: GlobalRole,
+  ) {
+    const opportunity = await this.opportunities.findOne({ where: { unitId, id: opportunityId } });
+    if (!opportunity) throw new NotFoundException('Oportunidade não encontrada.');
+    await this.assertOpportunityAccess(opportunity, userId, role, globalRole);
+    if (opportunity.status !== OpportunityStatus.WON) {
+      throw new BadRequestException('Ações de alteração contratual só estão disponíveis para oportunidades já convertidas.');
+    }
+    return opportunity;
+  }
+
+  private pendingPrecheckoutSummary(pending: Awaited<ReturnType<CommercialWorkflowService['revisionPendingPrecheckout']>>) {
+    if (!pending) return null;
+    return {
+      id: pending.session.id,
+      status: pending.session.status,
+      contractId: pending.contract.id,
+      relationType: pending.contract.relationType,
+      expiresAt: pending.session.expiresAt,
+      checkout: pending.checkout ? {
+        id: pending.checkout.id,
+        status: pending.checkout.status,
+        url: pending.checkout.url,
+        expiresAt: pending.checkout.expiresAt,
+      } : null,
+    };
+  }
+
+  private async cancelPendingAsaasResource(unitId: string, checkout: CheckoutSession | null) {
+    if (!checkout?.externalId) return;
+    try {
+      if (checkout.payload?.providerResourceType === 'CHECKOUT') {
+        await this.asaas.cancelCheckout(unitId, checkout.externalId);
+      } else if (checkout.payload?.providerResourceType === 'SUBSCRIPTION') {
+        const paymentId = checkout.payload?.paymentId;
+        if (paymentId) await this.asaas.deletePayment(unitId, paymentId);
+        await this.asaas.deleteSubscription(unitId, checkout.externalId);
+      }
+    } catch (error) {
+      if (!(error instanceof AsaasApiException) || error.providerStatus !== 404) throw error;
+    }
+  }
+
+  private async revisionDraftContext(
+    unitId: string, opportunityId: string, userId: string, role: UnitRole | null, globalRole: GlobalRole,
+  ) {
+    const opportunity = await this.opportunities.findOne({ where: { unitId, id: opportunityId } });
+    if (!opportunity) throw new NotFoundException('Oportunidade não encontrada.');
+    await this.assertOpportunityAccess(opportunity, userId, role, globalRole);
+    const all = await this.contracts.find({ where: { unitId, opportunityId } });
+    const parent = all.filter((item) => item.status === ContractStatus.ACCEPTED)
+      .sort((left, right) => (right.version || 0) - (left.version || 0))[0];
+    if (!parent) throw new NotFoundException('Contrato vigente não encontrado.');
+    const children = all.filter((item) => item.parentContractId === parent.id);
+    return { opportunity, parent, children, draft: children.find((item) => item.status === ContractStatus.DRAFT) || null };
+  }
+
+  private async calculateRevisionDraftProposal(
+    parent: Contract,
+    opportunity: Opportunity,
+    dto: SaveContractRevisionDraftDto & { relationType: ContractRelationType },
+    userId: string,
+    role: UnitRole | null,
+  ) {
+    const currentNegotiation = parent.snapshot?.negotiation || opportunity.negotiationSnapshot || {};
+    const changes = dto.changes || {};
+    const currentPricing = currentNegotiation.pricing || {};
+    const currentParticipants = currentNegotiation.participants || {};
+    if (opportunity.customerType === CustomerType.PERSON
+      && (currentNegotiation.cycle || opportunity.billingCycle) === BillingCycle.YEARLY
+      && changes.dependentCount != null
+      && Number(changes.dependentCount) > Number(currentParticipants.dependentCount || 0)
+      && dto.relationType !== ContractRelationType.RENEWAL) {
+      throw new BadRequestException('Em plano PF anual, novos dependentes somente podem ser incluídos por renovação contratual.');
+    }
+    if (opportunity.customerType === CustomerType.COMPANY && changes.lives != null) {
+      const subscription = await this.subscriptions.findOne({ where: { unitId: opportunity.unitId, sourceOpportunityId: opportunity.id } });
+      if (subscription) {
+        const registered = await this.subscriptionMembers.count({
+          where: { unitId: opportunity.unitId, subscriptionId: subscription.id, role: MemberRole.DEPENDENT, status: SubscriptionMemberStatus.ACTIVE },
+        });
+        if (Number(changes.lives) < registered) {
+          throw new BadRequestException(`A quantidade contratada não pode ser menor que os ${registered} beneficiários atualmente cadastrados.`);
+        }
+      }
+    }
+    const cycle = changes.cycle || currentNegotiation.cycle || opportunity.billingCycle;
+    if (!cycle) throw new BadRequestException('Periodicidade contratual não definida.');
+    const allowedBillingTypes = changes.allowedBillingTypes?.length
+      ? changes.allowedBillingTypes
+      : currentNegotiation.allowedBillingTypes?.length ? currentNegotiation.allowedBillingTypes
+        : opportunity.billingType ? [opportunity.billingType] : [BillingType.CREDIT_CARD];
+    const billingType = allowedBillingTypes.includes(opportunity.billingType as BillingType)
+      ? opportunity.billingType as BillingType
+      : allowedBillingTypes[0];
+    const calculation = this.pricing.calculate({
+      customerType: opportunity.customerType,
+      cycle,
+      billingType,
+      baseAmount: opportunity.customerType === CustomerType.PERSON
+        ? Number(changes.holderAmount ?? currentPricing.holderAmount ?? currentPricing.baseAmount ?? opportunity.expectedValue ?? 0)
+        : Number(changes.unitPrice ?? currentPricing.unitPrice ?? currentPricing.baseAmount ?? opportunity.expectedValue ?? 0),
+      dependentAmount: opportunity.customerType === CustomerType.PERSON ? Number(changes.dependentAmount ?? currentPricing.dependentAmount ?? 0) : undefined,
+      dependentCount: opportunity.customerType === CustomerType.PERSON ? Number(changes.dependentCount ?? currentParticipants.dependentCount ?? 0) : undefined,
+      unitPrice: opportunity.customerType === CustomerType.COMPANY ? Number(changes.unitPrice ?? currentPricing.unitPrice ?? 0) : undefined,
+      lives: opportunity.customerType === CustomerType.COMPANY ? Number(changes.lives ?? currentParticipants.contractedLives ?? 1) : undefined,
+      annualDiscountPercent: Number(changes.annualDiscountPercent ?? currentPricing.annualDiscountPercent ?? 0),
+      discounts: changes.discounts ?? currentNegotiation.discounts ?? [],
+    });
+    const negotiation = {
+      ...calculation,
+      allowedBillingTypes,
+      revisionEffectiveAt: changes.effectiveAt || new Date().toISOString().slice(0, 10),
+    };
+    const subject = await this.policySubject(opportunity, userId, role);
+    const policyEvaluation = await this.evaluate(
+      opportunity.unitId, subject.userId, subject.role, negotiation, opportunity.customerType, opportunity.teamId,
+    );
+    return {
+      negotiation,
+      effectiveAt: negotiation.revisionEffectiveAt,
+      requiresPayment: cycle !== (currentNegotiation.cycle || opportunity.billingCycle)
+        || dto.requiresPayment === true
+        || [ContractRelationType.RENEWAL, ContractRelationType.REPLACEMENT].includes(dto.relationType),
+      policyEvaluation,
+    };
   }
 
   async createContractRevision(
@@ -346,6 +868,37 @@ export class CommercialWorkflowService {
     const changes = dto.changes || {};
     const currentPricing = currentNegotiation.pricing || {};
     const currentParticipants = currentNegotiation.participants || {};
+    if (
+      opportunity.customerType === CustomerType.PERSON
+      && (currentNegotiation.cycle || opportunity.billingCycle) === 'YEARLY'
+      && changes.dependentCount != null
+      && Number(changes.dependentCount) > Number(currentParticipants.dependentCount || 0)
+      && dto.relationType !== ContractRelationType.RENEWAL
+    ) {
+      throw new BadRequestException(
+        'Em plano PF anual, novos dependentes somente podem ser incluídos por renovação contratual. O sistema não aplica pró-rata automático no meio da vigência.',
+      );
+    }
+    if (opportunity.customerType === CustomerType.COMPANY && changes.lives != null) {
+      const currentSubscription = await this.subscriptions.findOne({
+        where: { unitId, sourceOpportunityId: opportunity.id },
+      });
+      if (currentSubscription) {
+        const registeredBeneficiaries = await this.subscriptionMembers.count({
+          where: {
+            unitId,
+            subscriptionId: currentSubscription.id,
+            role: MemberRole.DEPENDENT,
+            status: SubscriptionMemberStatus.ACTIVE,
+          },
+        });
+        if (Number(changes.lives) < registeredBeneficiaries) {
+          throw new BadRequestException(
+            `A quantidade contratada não pode ser menor que os ${registeredBeneficiaries} beneficiários atualmente cadastrados.`,
+          );
+        }
+      }
+    }
     const cycle = changes.cycle || currentNegotiation.cycle || opportunity.billingCycle;
     if (!cycle) throw new BadRequestException('Periodicidade contratual não definida.');
 
@@ -396,12 +949,57 @@ export class CommercialWorkflowService {
       opportunity.customerType,
       opportunity.teamId,
     );
-    if (!policyEvaluation.allowed && ![UnitRole.OWNER, UnitRole.ADMIN, UnitRole.MANAGER].includes(role as UnitRole)
-      && globalRole !== GlobalRole.INSTALLATION_ADMIN) {
-      throw new BadRequestException({
-        message: 'A alteração contratual ultrapassa os limites do usuário.',
-        violations: policyEvaluation.violations,
-      });
+    if (!policyEvaluation.allowed) {
+      const currentRevisionApproval = await this.currentRevisionApproval(
+        unitId, opportunity.id, negotiation, parent.id, parent.contentHash, dto.relationType,
+      );
+      if (currentRevisionApproval?.status === ApprovalStatus.REJECTED) {
+        throw new BadRequestException({
+          message: 'A condição desta alteração contratual foi rejeitada. Ajuste as condições antes de tentar novamente.',
+          approvalRequired: true,
+          approvalRequestId: currentRevisionApproval.id,
+          approvalStatus: currentRevisionApproval.status,
+          violations: policyEvaluation.violations,
+        });
+      }
+      if (currentRevisionApproval?.status !== ApprovalStatus.APPROVED) {
+        const approval = currentRevisionApproval?.status === ApprovalStatus.PENDING
+          ? currentRevisionApproval
+          : await this.approvals.save(this.approvals.create({
+            unitId,
+            opportunityId: opportunity.id,
+            requestedBy: userId,
+            decidedBy: null,
+            status: ApprovalStatus.PENDING,
+            reason: `Alteração contratual: ${dto.reason.trim()}`,
+            requestedConditions: {
+              ...negotiation,
+              revisionContext: {
+                parentContractId: parent.id,
+                parentContentHash: parent.contentHash,
+                relationType: dto.relationType,
+              },
+            },
+            policyEvaluation,
+            decisionNotes: null,
+            decidedAt: null,
+          }));
+        if (!currentRevisionApproval) {
+          await this.audit(unitId, userId, 'contract_revision.approval_requested', 'approval_request', approval.id, null, {
+            opportunityId: opportunity.id,
+            parentContractId: parent.id,
+            relationType: dto.relationType,
+            violations: policyEvaluation.violations,
+          });
+        }
+        throw new BadRequestException({
+          message: 'A alteração contratual foge da política comercial e precisa ser aprovada antes da emissão do novo contrato.',
+          approvalRequired: true,
+          approvalRequestId: approval.id,
+          approvalStatus: approval.status,
+          violations: policyEvaluation.violations,
+        });
+      }
     }
 
     const revisionData = {
@@ -423,8 +1021,10 @@ export class CommercialWorkflowService {
     const allContracts = await this.contracts.find({
       where: { unitId, opportunityId: opportunity.id },
     });
-    const requiresPayment = dto.requiresPayment
-      ?? [ContractRelationType.RENEWAL, ContractRelationType.REPLACEMENT].includes(dto.relationType);
+    const changesBillingCycle = cycle !== (currentNegotiation.cycle || opportunity.billingCycle);
+    const requiresPayment = changesBillingCycle
+      || dto.requiresPayment
+      || [ContractRelationType.RENEWAL, ContractRelationType.REPLACEMENT].includes(dto.relationType);
     const nextVersion = Math.max(parent.version, ...allContracts.map((item) => item.version || 0)) + 1;
 
     const revision = await this.contracts.save(this.contracts.create({
@@ -520,6 +1120,15 @@ export class CommercialWorkflowService {
         userId,
         role || null,
         globalRole || GlobalRole.STANDARD,
+      );
+    }
+    const existingSubscription = await this.subscriptions.findOne({
+      where: { unitId, sourceOpportunityId: opportunityId },
+    });
+    if (opportunity.commercialStatus === CommercialStatus.CONVERTED
+      || (existingSubscription && existingSubscription.status !== SubscriptionStatus.PENDING_PAYMENT)) {
+      throw new ConflictException(
+        'Esta oportunidade já foi convertida em assinatura. Use o histórico contratual para criar um aditivo, renovação ou substituição; não gere uma contratação inicial novamente.',
       );
     }
     if (!await this.resolveTemplate(opportunity)) {
@@ -712,9 +1321,29 @@ export class CommercialWorkflowService {
     } : null;
 
     const effectivePricing = contract?.snapshot?.negotiation || session.pricingSnapshot;
+    const checkout = session.checkoutSessionId
+      ? await this.checkoutSessions.findOne({ where: { id: session.checkoutSessionId, unitId: session.unitId } })
+      : null;
+    const localSubscription = await this.subscriptions.findOne({
+      where: { unitId: session.unitId, sourceOpportunityId: session.opportunityId },
+    });
+    // A assinatura vigente pertence ao contrato anterior. Ela nunca confirma o
+    // pagamento de um novo aditivo: somente a sessão deste pré-checkout pode fazê-lo.
+    const paymentConfirmed = session.status === PrecheckoutStatus.COMPLETED;
 
     return {
       status: session.status,
+      payment: {
+        checkoutStatus: checkout?.status || null,
+        confirmed: paymentConfirmed,
+        awaitingConfirmation: !paymentConfirmed && (
+          session.status === PrecheckoutStatus.PAYMENT_PENDING
+          || checkout?.status === CheckoutStatus.PAID
+        ),
+      },
+      currentSubscription: localSubscription ? {
+        status: localSubscription.status,
+      } : null,
       expiresAt: session.expiresAt,
       customerType: opportunity.customerType,
       participantEditingAllowed: opportunity.customerType === CustomerType.PERSON
@@ -1020,7 +1649,15 @@ export class CommercialWorkflowService {
     const session = await this.byToken(token);
     if (!session.contractId) throw new BadRequestException('Gere o contrato antes do aceite.');
     const contract = await this.contracts.findOneByOrFail({ id: session.contractId, unitId: session.unitId });
-    if (contract.status === ContractStatus.ACCEPTED) throw new ConflictException('Contrato já aceito.');
+    if (contract.status === ContractStatus.ACCEPTED) {
+      if (contract.parentContractId && !contract.requiresPayment) {
+        await this.applyAcceptedRevision(contract, session);
+        session.status = PrecheckoutStatus.COMPLETED;
+        await this.sessions.save(session);
+        return this.publicGet(token);
+      }
+      throw new ConflictException('Contrato já aceito.');
+    }
     const acceptedTaxId = normalizeTaxId(dto.acceptedByTaxId);
     if (!isValidTaxId(acceptedTaxId)) throw new BadRequestException('CPF/CNPJ do responsável inválido.');
     const opportunity = await this.opportunities.findOneByOrFail({
@@ -1086,6 +1723,11 @@ export class CommercialWorkflowService {
       const existing = await this.checkoutSessions.findOne({
         where: { id: session.checkoutSessionId, unitId: session.unitId },
       });
+      if (existing?.status === CheckoutStatus.PAID) {
+        throw new ConflictException(
+          'Este checkout já foi concluído no Asaas e aguarda confirmação financeira. Não realize um novo pagamento.',
+        );
+      }
       if (existing && [CheckoutStatus.CREATED, CheckoutStatus.PENDING].includes(existing.status)) {
         if (existing.url) {
           return { checkoutId: existing.id, checkoutLink: existing.url, expiresAt: existing.expiresAt };
@@ -1180,6 +1822,16 @@ export class CommercialWorkflowService {
     opportunity.commercialStatus = CommercialStatus.CHECKOUT_SENT;
     await this.sessions.save(session);
     await this.opportunities.save(opportunity);
+    await this.ensurePendingSubscriber({
+      session,
+      contract,
+      opportunity,
+      billingCustomer,
+      externalSubscriptionId: null,
+      value,
+      cycle,
+      billingType: dto.billingType,
+    });
     await this.audit(session.unitId, null, 'asaas.checkout_created', 'checkout_session', checkout.id, null, {
       opportunityId: opportunity.id,
       contractId: contract.id,
@@ -1316,6 +1968,16 @@ export class CommercialWorkflowService {
     opportunity.commercialStatus = CommercialStatus.CHECKOUT_SENT;
     await this.sessions.save(session);
     await this.opportunities.save(opportunity);
+    await this.ensurePendingSubscriber({
+      session,
+      contract,
+      opportunity,
+      billingCustomer,
+      externalSubscriptionId: subscription.id,
+      value,
+      cycle,
+      billingType,
+    });
 
     try {
       const response = await this.asaas.subscriptionPayments(session.unitId, subscription.id, undefined, 10);
@@ -1348,6 +2010,147 @@ export class CommercialWorkflowService {
   }
 
 
+  private async ensurePendingSubscriber(input: {
+    session: PrecheckoutSession;
+    contract: Contract;
+    opportunity: Opportunity;
+    billingCustomer: BillingCustomer;
+    externalSubscriptionId: string | null;
+    value: number;
+    cycle: string;
+    billingType: BillingType;
+  }) {
+    const { session, contract, opportunity, billingCustomer, externalSubscriptionId, value, cycle, billingType } = input;
+    if (contract.relationType !== ContractRelationType.ORIGINAL) return null;
+
+    const billingConnection = await this.billing.connectionEntity(session.unitId);
+    let subscription = await this.subscriptions.findOne({
+      where: { unitId: session.unitId, sourceOpportunityId: opportunity.id },
+    });
+    const wasCreated = !subscription;
+    if (!subscription) {
+      subscription = this.subscriptions.create({
+        unitId: session.unitId,
+        primaryPersonId: opportunity.primaryPersonId,
+        planPriceId: opportunity.planPriceId,
+        sourceOpportunityId: opportunity.id,
+        billingConnectionId: billingConnection?.id || null,
+        externalSubscriptionId,
+        status: SubscriptionStatus.PENDING_PAYMENT,
+        financialStatus: FinancialStatus.UNKNOWN,
+        accessStatus: AccessStatus.DISABLED,
+        startedAt: null,
+        firstActiveAt: null,
+        currentPeriodStart: null,
+        currentPeriodEnd: null,
+        cancellationScheduledAt: null,
+        cancelledAt: null,
+        lastReactivatedAt: null,
+        cancellationReasonCode: null,
+        cancellationReasonText: null,
+        metadata: {},
+      });
+    } else if (subscription.status === SubscriptionStatus.DRAFT) {
+      subscription.status = SubscriptionStatus.PENDING_PAYMENT;
+      subscription.financialStatus = FinancialStatus.UNKNOWN;
+      subscription.accessStatus = AccessStatus.DISABLED;
+    }
+
+    if (externalSubscriptionId) subscription.externalSubscriptionId = externalSubscriptionId;
+    subscription.billingConnectionId = subscription.billingConnectionId || billingConnection?.id || null;
+    subscription.metadata = {
+      ...(subscription.metadata || {}),
+      contractId: contract.id,
+      contractVersion: contract.version,
+      contractHash: contract.contentHash,
+      contractRelationType: contract.relationType,
+      negotiationSnapshot: contract.snapshot?.negotiation || session.pricingSnapshot || {},
+      customerType: opportunity.customerType,
+      contractedLives: contract.snapshot?.negotiation?.participants?.contractedLives ?? null,
+      contractedDependents: contract.snapshot?.negotiation?.participants?.dependentCount ?? 0,
+      contractedAmount: value,
+      billingCycle: cycle,
+      billingType,
+      billingCustomerId: billingCustomer.id,
+      companyContacts: opportunity.customerType === CustomerType.COMPANY ? {
+        legalRepresentative: session.customerData?.legalRepresentative || null,
+        financialContact: session.customerData?.financialContact || null,
+      } : null,
+      offerVersionId: opportunity.offerVersionId || null,
+      checkoutSessionId: session.checkoutSessionId || null,
+      precheckoutSessionId: session.id,
+      pendingCreatedAt: subscription.metadata?.pendingCreatedAt || new Date().toISOString(),
+    };
+    subscription = await this.subscriptions.save(subscription);
+
+    const desiredMembers = [
+      { personId: opportunity.primaryPersonId, role: MemberRole.PRIMARY, relationship: null as string | null },
+      ...(await this.opportunityMembers.find({
+        where: { unitId: session.unitId, opportunityId: opportunity.id },
+      })).map((member) => ({ personId: member.personId, role: member.role, relationship: member.relationship })),
+    ];
+    for (const desired of desiredMembers) {
+      let member = await this.subscriptionMembers.findOne({
+        where: { unitId: session.unitId, subscriptionId: subscription.id, personId: desired.personId },
+      });
+      if (!member) {
+        member = this.subscriptionMembers.create({
+          unitId: session.unitId,
+          subscriptionId: subscription.id,
+          personId: desired.personId,
+          role: desired.role,
+          status: SubscriptionMemberStatus.ACTIVE,
+          joinedAt: new Date(),
+          leftAt: null,
+          relationship: desired.relationship,
+        });
+      } else {
+        member.role = desired.role;
+        member.status = SubscriptionMemberStatus.ACTIVE;
+        member.leftAt = null;
+        member.relationship = desired.relationship;
+      }
+      await this.subscriptionMembers.save(member);
+    }
+
+    const existingSale = await this.sales.findOne({
+      where: { unitId: session.unitId, opportunityId: opportunity.id, subscriptionId: subscription.id },
+    });
+    if (!existingSale) {
+      await this.sales.save(this.sales.create({
+        unitId: session.unitId,
+        opportunityId: opportunity.id,
+        subscriptionId: subscription.id,
+        salespersonId: opportunity.ownerUserId,
+        grossAmount: Number(value).toFixed(2),
+        commissionAmount: (value * 0.1).toFixed(2),
+        commissionPaid: false,
+        soldAt: contract.acceptedAt || new Date(),
+      }));
+    }
+
+    opportunity.status = OpportunityStatus.WON;
+    opportunity.commercialStatus = CommercialStatus.CONVERTED;
+    opportunity.wonAt = opportunity.wonAt || new Date();
+    await this.opportunities.save(opportunity);
+
+    if (wasCreated) {
+      await this.lifecycle.record({
+        unitId: session.unitId,
+        type: 'subscription.pending_payment',
+        personId: subscription.primaryPersonId,
+        subscriptionId: subscription.id,
+        fromStatus: SubscriptionStatus.DRAFT,
+        toStatus: SubscriptionStatus.PENDING_PAYMENT,
+        source: LifecycleSource.SYSTEM,
+        correlationId: session.id,
+        metadata: { contractId: contract.id, opportunityId: opportunity.id },
+      });
+    }
+    return subscription;
+  }
+
+
   private renderRevision(parent: Contract, revision: Record<string, any>, negotiation: Record<string, any>) {
     const title = {
       [ContractRelationType.AMENDMENT]: 'ADITIVO CONTRATUAL',
@@ -1355,26 +2158,55 @@ export class CommercialWorkflowService {
       [ContractRelationType.REPLACEMENT]: 'SUBSTITUIÇÃO CONTRATUAL',
       [ContractRelationType.ORIGINAL]: 'CONTRATO',
     }[revision.relationType as ContractRelationType];
-    const effectiveAt = revision.changes?.effectiveAt || new Date().toISOString().slice(0, 10);
-    const conditions = JSON.stringify({
-      cycle: negotiation.cycle,
-      participants: negotiation.participants,
-      pricing: negotiation.pricing,
-      discounts: negotiation.discounts,
-      allowedBillingTypes: negotiation.allowedBillingTypes,
-      notes: revision.changes?.notes || null,
-    }, null, 2);
+    const effectiveAt = this.formatContractDate(revision.changes?.effectiveAt || new Date().toISOString().slice(0, 10));
+    const pricing = negotiation.pricing || {};
+    const participants = negotiation.participants || {};
+    const money = (value: unknown) => new Intl.NumberFormat('pt-BR', {
+      style: 'currency', currency: 'BRL',
+    }).format(Number(value || 0));
+    const cycleLabel = negotiation.cycle === BillingCycle.YEARLY ? 'Anual' : 'Mensal';
+    const billingTypeLabels: Record<string, string> = {
+      [BillingType.CREDIT_CARD]: 'Cartão de crédito',
+      [BillingType.BOLETO]: 'Boleto',
+      [BillingType.PIX]: 'Pix',
+    };
+    const conditions = [
+      `Periodicidade: ${cycleLabel}`,
+      negotiation.customerType === CustomerType.COMPANY
+        ? `Vidas contratadas: ${Number(participants.contractedLives || 0)}`
+        : `Dependentes contratados: ${Number(participants.dependentCount || 0)}`,
+      negotiation.customerType === CustomerType.COMPANY
+        ? `Valor por vida: ${money(pricing.unitPrice)}`
+        : `Valor do titular: ${money(pricing.holderAmount)}`,
+      negotiation.customerType === CustomerType.PERSON
+        ? `Valor por dependente: ${money(pricing.dependentAmount)}`
+        : null,
+      `Equivalente mensal: ${money(pricing.monthlyEquivalent ?? pricing.finalAmount)}`,
+      negotiation.cycle === BillingCycle.YEARLY
+        ? `Valor total anual: ${money(pricing.finalAmount)}`
+        : `Valor total mensal: ${money(pricing.finalAmount)}`,
+      `Formas de pagamento: ${(negotiation.allowedBillingTypes || [])
+        .map((type: string) => billingTypeLabels[type] || type)
+        .join(', ') || 'A definir'}`,
+      `Vigência: ${effectiveAt}`,
+      revision.changes?.notes?.trim() ? `Observações: ${revision.changes.notes.trim()}` : null,
+    ].filter(Boolean).join('\n');
     return `${title}
 
-Contrato de origem: ${parent.id}
-Hash do contrato de origem: ${parent.contentHash}
 Motivo: ${revision.reason}
-Vigência das alterações: ${effectiveAt}
 
 CONDIÇÕES ATUALIZADAS
 ${conditions}
 
 As demais cláusulas do contrato de origem permanecem inalteradas.`;
+  }
+
+  private formatContractDate(value: unknown) {
+    const date = typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)
+      ? new Date(`${value}T12:00:00`)
+      : new Date(String(value));
+    if (Number.isNaN(date.getTime())) return 'A definir';
+    return new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo' }).format(date);
   }
 
   private async applyAcceptedRevision(contract: Contract, session: PrecheckoutSession) {
@@ -1383,34 +2215,132 @@ As demais cláusulas do contrato de origem permanecem inalteradas.`;
       where: { unitId: contract.unitId, id: contract.opportunityId },
     });
     if (!opportunity) throw new NotFoundException('Oportunidade da alteração contratual não encontrada.');
-    opportunity.negotiationSnapshot = negotiation;
-    opportunity.expectedValue = Number(negotiation.pricing?.finalAmount || opportunity.expectedValue || 0).toFixed(2);
-    opportunity.billingCycle = negotiation.cycle || opportunity.billingCycle;
-    opportunity.billingType = negotiation.allowedBillingTypes?.[0] || opportunity.billingType;
-    await this.opportunities.save(opportunity);
 
     const subscription = await this.subscriptions.findOne({
       where: { unitId: contract.unitId, sourceOpportunityId: opportunity.id },
     });
-    if (subscription) {
-      subscription.metadata = {
-        ...(subscription.metadata || {}),
-        contractId: contract.id,
-        contractVersion: contract.version,
-        contractHash: contract.contentHash,
-        contractRelationType: contract.relationType,
-        parentContractId: contract.parentContractId,
-        negotiationSnapshot: negotiation,
-        contractedLives: negotiation.participants?.contractedLives || null,
-      };
-      await this.subscriptions.save(subscription);
+    if (!subscription) throw new NotFoundException('Assinatura vinculada à oportunidade não encontrada.');
+
+    const value = Number(negotiation.pricing?.finalAmount ?? subscription.metadata?.contractedAmount ?? 0);
+    const cycle = negotiation.cycle || subscription.metadata?.billingCycle || opportunity.billingCycle;
+    const currentBillingType = subscription.metadata?.billingType || opportunity.billingType || null;
+    const billingType = negotiation.billingType
+      || (currentBillingType && negotiation.allowedBillingTypes?.includes(currentBillingType) ? currentBillingType : null)
+      || negotiation.allowedBillingTypes?.[0]
+      || currentBillingType;
+    if (!(value > 0) || !cycle || !billingType) {
+      throw new BadRequestException('A alteração contratual não possui condições financeiras válidas.');
     }
+
+    if (subscription.externalSubscriptionId) {
+      const alreadySynced = subscription.metadata?.lastAppliedContractId === contract.id;
+      if (!alreadySynced) {
+        await this.asaas.updateSubscription(contract.unitId, subscription.externalSubscriptionId, {
+          value,
+          cycle,
+          billingType,
+          updatePendingPayments: true,
+        });
+      }
+    }
+
+    opportunity.negotiationSnapshot = negotiation;
+    opportunity.expectedValue = value.toFixed(2);
+    opportunity.billingCycle = cycle;
+    opportunity.billingType = billingType;
+    await this.opportunities.save(opportunity);
+
+    subscription.metadata = {
+      ...(subscription.metadata || {}),
+      contractId: contract.id,
+      contractVersion: contract.version,
+      contractHash: contract.contentHash,
+      contractRelationType: contract.relationType,
+      parentContractId: contract.parentContractId,
+      negotiationSnapshot: negotiation,
+      contractedLives: negotiation.participants?.contractedLives ?? subscription.metadata?.contractedLives ?? null,
+      contractedDependents: negotiation.participants?.dependentCount ?? subscription.metadata?.contractedDependents ?? 0,
+      contractedAmount: value,
+      billingCycle: cycle,
+      billingType,
+      lastAppliedContractId: contract.id,
+      lastContractChangeAt: new Date().toISOString(),
+    };
+    await this.subscriptions.save(subscription);
+    if (opportunity.customerType === CustomerType.PERSON) {
+      await this.syncSubscriptionMembersFromOpportunity(subscription, opportunity);
+    }
+
+    await this.lifecycle.record({
+      unitId: contract.unitId,
+      type: 'subscription.contract_changed',
+      personId: subscription.primaryPersonId,
+      subscriptionId: subscription.id,
+      source: LifecycleSource.SYSTEM,
+      correlationId: contract.id,
+      metadata: {
+        contractId: contract.id,
+        parentContractId: contract.parentContractId,
+        relationType: contract.relationType,
+        value,
+        cycle,
+        billingType,
+      },
+    });
     await this.audit(contract.unitId, null, 'contract.revision_applied', 'contract', contract.id, null, {
       opportunityId: opportunity.id,
-      subscriptionId: subscription?.id || null,
+      subscriptionId: subscription.id,
       relationType: contract.relationType,
       requiresPayment: contract.requiresPayment,
+      providerSubscriptionUpdated: Boolean(subscription.externalSubscriptionId),
+      updatePendingPayments: Boolean(subscription.externalSubscriptionId),
     });
+  }
+
+  private async syncSubscriptionMembersFromOpportunity(subscription: Subscription, opportunity: Opportunity) {
+    const opportunityMembers = await this.opportunityMembers.find({
+      where: { unitId: opportunity.unitId, opportunityId: opportunity.id },
+    });
+    const desired = new Map<string, { role: MemberRole; relationship: string | null }>();
+    desired.set(opportunity.primaryPersonId, { role: MemberRole.PRIMARY, relationship: null });
+    for (const member of opportunityMembers) {
+      desired.set(member.personId, { role: member.role, relationship: member.relationship });
+    }
+
+    const current = await this.subscriptionMembers.find({
+      where: { unitId: opportunity.unitId, subscriptionId: subscription.id },
+    });
+    const currentByPerson = new Map(current.map((member) => [member.personId, member]));
+    const now = new Date();
+    for (const [personId, data] of desired) {
+      let member = currentByPerson.get(personId);
+      if (!member) {
+        member = this.subscriptionMembers.create({
+          unitId: opportunity.unitId,
+          subscriptionId: subscription.id,
+          personId,
+          role: data.role,
+          status: SubscriptionMemberStatus.ACTIVE,
+          joinedAt: now,
+          leftAt: null,
+          relationship: data.relationship,
+        });
+      } else {
+        member.role = data.role;
+        member.relationship = data.relationship;
+        member.status = SubscriptionMemberStatus.ACTIVE;
+        member.leftAt = null;
+      }
+      await this.subscriptionMembers.save(member);
+    }
+    for (const member of current) {
+      if (member.role === MemberRole.PRIMARY || desired.has(member.personId)) continue;
+      if (member.status === SubscriptionMemberStatus.ACTIVE) {
+        member.status = SubscriptionMemberStatus.INACTIVE;
+        member.leftAt = now;
+        await this.subscriptionMembers.save(member);
+      }
+    }
   }
 
   private async resolveTemplate(opportunity: Opportunity) {
@@ -1457,6 +2387,7 @@ As demais cláusulas do contrato de origem permanecem inalteradas.`;
     const participants = await this.participants.find({
       where: { precheckoutSessionId: session.id, unitId: session.unitId },
     });
+    const desiredPersonIds = new Set<string>();
     for (const participant of participants) {
       let person = await this.people.findOne({
         where: { unitId: session.unitId, taxId: participant.taxId },
@@ -1480,24 +2411,43 @@ As demais cláusulas do contrato de origem permanecem inalteradas.`;
           postalCode: null,
           metadata: { source: 'precheckout' },
         }));
+      } else {
+        person.name = participant.name;
+        person.birthDate = participant.birthDate || person.birthDate;
+        await this.people.save(person);
       }
-      const exists = await this.opportunityMembers.exists({
+      desiredPersonIds.add(person.id);
+      let member = await this.opportunityMembers.findOne({
         where: {
           unitId: session.unitId,
           opportunityId: session.opportunityId,
           personId: person.id,
         },
       });
-      if (!exists) {
-        await this.opportunityMembers.save(this.opportunityMembers.create({
+      if (!member) {
+        member = this.opportunityMembers.create({
           unitId: session.unitId,
           opportunityId: session.opportunityId,
           personId: person.id,
           role: MemberRole.DEPENDENT,
           relationship: participant.relationship,
-        }));
+        });
+      } else {
+        member.role = MemberRole.DEPENDENT;
+        member.relationship = participant.relationship;
       }
+      await this.opportunityMembers.save(member);
     }
+
+    const existingDependents = await this.opportunityMembers.find({
+      where: {
+        unitId: session.unitId,
+        opportunityId: session.opportunityId,
+        role: MemberRole.DEPENDENT,
+      },
+    });
+    const stale = existingDependents.filter((member) => !desiredPersonIds.has(member.personId));
+    if (stale.length) await this.opportunityMembers.remove(stale);
   }
 
   private async policySubject(
@@ -1530,6 +2480,28 @@ As demais cláusulas do contrato de origem permanecem inalteradas.`;
     const currentSnapshot = this.canonical(this.approvalTerms(snapshot || {}));
     return approvals.find((approval) =>
       approval.status !== ApprovalStatus.CANCELLED
+      && this.canonical(this.approvalTerms(approval.requestedConditions || {})) === currentSnapshot,
+    ) || null;
+  }
+
+  private async currentRevisionApproval(
+    unitId: string,
+    opportunityId: string,
+    snapshot: Record<string, any>,
+    parentContractId: string,
+    parentContentHash: string,
+    relationType: ContractRelationType,
+  ) {
+    const approvals = await this.approvals.find({
+      where: { unitId, opportunityId },
+      order: { createdAt: 'DESC' },
+    });
+    const currentSnapshot = this.canonical(this.approvalTerms(snapshot || {}));
+    return approvals.find((approval) =>
+      approval.status !== ApprovalStatus.CANCELLED
+      && approval.requestedConditions?.revisionContext?.parentContractId === parentContractId
+      && approval.requestedConditions?.revisionContext?.parentContentHash === parentContentHash
+      && approval.requestedConditions?.revisionContext?.relationType === relationType
       && this.canonical(this.approvalTerms(approval.requestedConditions || {})) === currentSnapshot,
     ) || null;
   }

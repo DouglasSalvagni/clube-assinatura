@@ -30,6 +30,14 @@ type CompanyContactsForm = {
 type CheckoutData = {
   status: string;
   expiresAt?: string;
+  payment?: {
+    checkoutStatus?: string | null;
+    confirmed?: boolean;
+    awaitingConfirmation?: boolean;
+  };
+  currentSubscription?: {
+    status?: string | null;
+  } | null;
   customerType: 'PERSON' | 'COMPANY';
   participantEditingAllowed: boolean;
   customer: Partial<CustomerForm> & {
@@ -220,6 +228,19 @@ export default function PublicCheckoutPage() {
     || data.participants.length === negotiatedDependentCount;
   const registrationComplete = customerComplete && companyContactsComplete && dependentsComplete;
   const paymentReturn = searchParams.get('payment');
+  const paymentConfirmed = Boolean(data?.payment?.confirmed || data?.status === 'COMPLETED');
+  const paymentAwaitingConfirmation = Boolean(
+    !paymentConfirmed
+    && (data?.payment?.awaitingConfirmation || data?.status === 'PAYMENT_PENDING'),
+  );
+  const hasActiveCurrentSubscription = data?.currentSubscription?.status === 'ACTIVE';
+
+  useEffect(() => {
+    if (!data || paymentConfirmed) return;
+    if (!paymentAwaitingConfirmation && paymentReturn !== 'success') return;
+    const timer = window.setInterval(() => { void load(); }, 3_000);
+    return () => window.clearInterval(timer);
+  }, [data, load, paymentAwaitingConfirmation, paymentConfirmed, paymentReturn]);
 
   async function lookupPostalCode() {
     const postalCode = customer.postalCode.replace(/\D/g, '');
@@ -448,17 +469,23 @@ export default function PublicCheckoutPage() {
           </div>
         </header>
 
-        {paymentReturn && (
+        {(paymentReturn || paymentConfirmed || paymentAwaitingConfirmation) && (
           <div className={`mt-5 rounded-2xl border p-4 text-sm ${
-            paymentReturn === 'success'
+            paymentConfirmed
               ? 'border-green-200 bg-green-50 text-green-800'
-              : 'border-amber-200 bg-amber-50 text-amber-800'
+              : paymentReturn === 'expired' || paymentReturn === 'cancelled'
+                ? 'border-amber-200 bg-amber-50 text-amber-800'
+                : 'border-blue-200 bg-blue-50 text-blue-800'
           }`}>
-            {paymentReturn === 'success'
-              ? 'Você retornou do Asaas após a etapa de pagamento. A confirmação financeira será atualizada pelo processamento da cobrança.'
+            {paymentConfirmed
+              ? isRevision
+                ? 'Pagamento da alteração contratual confirmado. As novas condições já estão ativas.'
+                : 'Pagamento confirmado. Sua assinatura está ativa.'
               : paymentReturn === 'expired'
                 ? 'O checkout do Asaas expirou. Tente iniciar o pagamento novamente.'
-                : 'O checkout do Asaas foi cancelado. Você pode escolher novamente a forma de pagamento.'}
+                : paymentReturn === 'cancelled'
+                  ? 'O checkout do Asaas foi cancelado. Você pode escolher novamente a forma de pagamento.'
+                  : 'Pagamento concluído no Asaas. Estamos aguardando a confirmação financeira; esta página será atualizada automaticamente.'}
           </div>
         )}
 
@@ -613,6 +640,11 @@ export default function PublicCheckoutPage() {
                 <p className="mt-2 leading-6 text-gray-600">
                   Nesta etapa somente o aceite das novas condições é permitido. Dados cadastrais e participantes permanecem vinculados ao contrato de origem.
                 </p>
+                {hasActiveCurrentSubscription && (
+                  <div className="mt-4 rounded-2xl border border-blue-200 bg-blue-50 p-4 leading-6 text-blue-900">
+                    <strong>Assinatura atual ativa.</strong> Esta página trata uma nova alteração contratual. A assinatura atual permanece válida até a confirmação do pagamento da nova contratação no Asaas.
+                  </div>
+                )}
               </section>
             )}
 
@@ -800,46 +832,64 @@ export default function PublicCheckoutPage() {
             {data?.contract?.status === 'ACCEPTED' && data.contract.requiresPayment !== false && (
               <section className="rounded-3xl border border-gray-200 bg-white p-5 shadow-sm sm:p-6">
                 <p className="text-xs font-semibold uppercase tracking-wider text-gray-500">Etapa 3</p>
-                <h2 className="mt-1 text-lg font-semibold text-gray-950">Forma de pagamento</h2>
+                <h2 className="mt-1 text-lg font-semibold text-gray-950">
+                  {isRevision ? 'Pagamento da nova alteração contratual' : 'Forma de pagamento'}
+                </h2>
                 <p className="mt-1 text-sm leading-6 text-gray-600">
-                  A cobrança será criada com o valor e a periodicidade congelados no contrato aceito.
+                  {isRevision
+                    ? 'Um novo checkout e uma nova assinatura serão criados no Asaas com as condições deste aditivo. A assinatura atual só será substituída após a confirmação financeira.'
+                    : 'A cobrança será criada com o valor e a periodicidade congelados no contrato aceito.'}
                 </p>
 
-                {!registrationComplete && !isRevision && (
-                  <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm leading-6 text-red-700">
-                    Este contrato foi aceito com dados cadastrais incompletos. Por segurança, o pagamento não deve prosseguir neste link; solicite um novo pré-checkout ao responsável comercial.
+                {paymentConfirmed ? (
+                  <div className="mt-5 rounded-2xl border border-green-200 bg-green-50 p-4 text-sm font-medium text-green-800">
+                    {isRevision
+                      ? 'Pagamento da nova alteração confirmado. A assinatura anterior foi substituída conforme as condições aceitas.'
+                      : 'Pagamento confirmado e assinatura ativada. Não é necessário realizar outro pagamento.'}
                   </div>
-                )}
-
-                <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                  {(data.allowedBillingTypes || []).map((type) => (
-                    <label
-                      key={type}
-                      className={`cursor-pointer rounded-2xl border p-4 transition ${
-                        billingType === type
-                          ? 'border-gray-950 bg-gray-50 ring-2 ring-gray-950/5'
-                          : 'border-gray-200 hover:border-gray-400'
-                      }`}
-                    >
-                      <div className="flex items-center gap-2">
-                        <input type="radio" name="billingType" value={type} checked={billingType === type} onChange={() => setBillingType(type)} />
-                        <span className="text-sm font-semibold text-gray-900">{labels[type] || type}</span>
+                ) : paymentAwaitingConfirmation ? (
+                  <div className="mt-5 rounded-2xl border border-blue-200 bg-blue-50 p-4 text-sm leading-6 text-blue-800">
+                    O checkout já foi concluído. Estamos aguardando a confirmação financeira do Asaas e atualizando esta página automaticamente. Um novo pagamento está bloqueado.
+                  </div>
+                ) : (
+                  <>
+                    {!registrationComplete && !isRevision && (
+                      <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm leading-6 text-red-700">
+                        Este contrato foi aceito com dados cadastrais incompletos. Por segurança, o pagamento não deve prosseguir neste link; solicite um novo pré-checkout ao responsável comercial.
                       </div>
-                      <p className="mt-2 text-xs leading-5 text-gray-500">{billingDescriptions[type]}</p>
-                    </label>
-                  ))}
-                </div>
-                <button
-                  type="button"
-                  onClick={startPayment}
-                  disabled={busy || !billingType || (!registrationComplete && !isRevision)}
-                  className="mt-5 w-full rounded-xl bg-green-600 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-40 sm:w-auto"
-                >
-                  Continuar para pagamento no Asaas
-                </button>
-                <p className="mt-3 text-xs leading-5 text-gray-500">
-                  Você será redirecionado para o ambiente do Asaas para concluir os dados específicos do meio de pagamento.
-                </p>
+                    )}
+
+                    <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                      {(data.allowedBillingTypes || []).map((type) => (
+                        <label
+                          key={type}
+                          className={`cursor-pointer rounded-2xl border p-4 transition ${
+                            billingType === type
+                              ? 'border-gray-950 bg-gray-50 ring-2 ring-gray-950/5'
+                              : 'border-gray-200 hover:border-gray-400'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2">
+                            <input type="radio" name="billingType" value={type} checked={billingType === type} onChange={() => setBillingType(type)} />
+                            <span className="text-sm font-semibold text-gray-900">{labels[type] || type}</span>
+                          </div>
+                          <p className="mt-2 text-xs leading-5 text-gray-500">{billingDescriptions[type]}</p>
+                        </label>
+                      ))}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={startPayment}
+                      disabled={busy || !billingType || (!registrationComplete && !isRevision)}
+                      className="mt-5 w-full rounded-xl bg-green-600 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-40 sm:w-auto"
+                    >
+                      Continuar para pagamento no Asaas
+                    </button>
+                    <p className="mt-3 text-xs leading-5 text-gray-500">
+                      Você será redirecionado para o ambiente do Asaas para concluir os dados específicos do meio de pagamento.
+                    </p>
+                  </>
+                )}
               </section>
             )}
           </div>

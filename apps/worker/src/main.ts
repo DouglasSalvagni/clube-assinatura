@@ -27,6 +27,7 @@ if (!internalToken) {
     'INTERNAL_WORKER_TOKEN is required. Define it in the monorepo root .env.',
   );
 }
+const workerToken: string = internalToken;
 
 const connection = new IORedis(redisUrl, {
   maxRetriesPerRequest: null,
@@ -47,7 +48,7 @@ const worker = new Worker(
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          'x-internal-worker-token': internalToken,
+          'x-internal-worker-token': workerToken,
         },
         signal: AbortSignal.timeout(60_000),
       },
@@ -73,6 +74,37 @@ const worker = new Worker(
   },
 );
 
+const delinquencyIntervalMs = Math.max(
+  60_000,
+  Number(process.env.DELINQUENCY_ENFORCEMENT_INTERVAL_MS ?? 3_600_000),
+);
+
+async function enforceDelinquencyGrace(): Promise<void> {
+  try {
+    const response = await fetch(`${apiUrl}/internal/subscriptions/enforce-delinquency`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-internal-worker-token': workerToken,
+      },
+      signal: AbortSignal.timeout(60_000),
+    });
+    const body = await response.text();
+    if (!response.ok) {
+      throw new Error(`API returned ${response.status}: ${body.slice(0, 1000)}`);
+    }
+    console.log(`[worker] delinquency enforcement ${body || '{\"ok\":true}'}`);
+  } catch (error) {
+    console.error('[worker] delinquency enforcement failed', error);
+  }
+}
+
+const delinquencyTimer = setInterval(() => {
+  void enforceDelinquencyGrace();
+}, delinquencyIntervalMs);
+delinquencyTimer.unref();
+setTimeout(() => void enforceDelinquencyGrace(), 15_000).unref();
+
 worker.on('ready', () => {
   console.log('[worker] billing-webhooks ready');
 });
@@ -90,6 +122,7 @@ worker.on('error', (error) => {
 });
 
 async function shutdown(signal: string): Promise<void> {
+  clearInterval(delinquencyTimer);
   console.log(`[worker] shutting down after ${signal}`);
   await worker.close();
   await connection.quit();

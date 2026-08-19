@@ -1,4 +1,4 @@
-import { ConflictException } from '@nestjs/common';
+import { BadRequestException, ConflictException } from '@nestjs/common';
 import { GlobalRole } from '../../database/entities';
 import { OpportunitiesService } from './opportunities.service';
 
@@ -33,6 +33,9 @@ describe('OpportunitiesService — transição do checkout', () => {
       repository() as any,
       repository() as any,
       repository() as any,
+      {} as any,
+      {} as any,
+      {} as any,
       {} as any,
       {} as any,
       {} as any,
@@ -100,6 +103,9 @@ describe('OpportunitiesService — escopo e atribuição', () => {
       repository() as any,
       repository() as any,
       repository() as any,
+      {} as any,
+      {} as any,
+      {} as any,
       {} as any,
       {} as any,
       {} as any,
@@ -188,5 +194,19 @@ describe('OpportunitiesService — escopo e atribuição', () => {
       ownerUserId: null,
       teamId: 'team-2',
     }));
+  });
+
+  it('keeps a converted opportunity blocked for ordinary edits', async () => {
+    const { service, opportunityRepository } = accessService({
+      opportunity: {
+        id: 'opp-won', unitId: 'unit-1', primaryPersonId: 'person-1', ownerUserId: 'admin-1',
+        teamId: null, status: 'WON', customerType: 'PERSON', negotiationSnapshot: { pricing: { finalAmount: 100 } },
+      },
+    });
+
+    await expect(service.update(
+      'unit-1', 'opp-won', { cycle: 'YEARLY' } as any, 'admin-1', 'ADMIN' as any, GlobalRole.STANDARD,
+    )).rejects.toBeInstanceOf(BadRequestException);
+    expect(opportunityRepository.save).not.toHaveBeenCalled();
   });
 });
